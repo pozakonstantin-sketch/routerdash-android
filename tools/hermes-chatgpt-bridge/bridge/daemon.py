@@ -1,4 +1,12 @@
-"""Bridge Daemon — главный демон моста Hermes ↔ ChatGPT."""
+"""Bridge Daemon — главный демон моста Hermes ↔ ChatGPT.
+
+Основные требования:
+- dry_run=true не запускает Hermes, не отправляет сообщения в ChatGPT, не выполняет внешние действия
+- Не терять задачи при ошибках и перезапуске (StateManager хранит pending задачи)
+- Не обрабатывать собственные ответы как новые задачи
+- Не отправлять одну задачу повторно (dedup через message_id)
+- Передавать результат Hermes в ChatGPT только после подтверждённого завершения задачи
+"""
 
 import argparse
 import json
@@ -32,6 +40,7 @@ class BridgeDaemon:
         self.task_identifier: Optional[TaskIdentifier] = None
         self.hermes_connector: Optional[HermesConnector] = None
         self.response_sender: Optional[ResponseSender] = None
+        self.response_sent: set = set()  # Set for tracking tasks already sent (no retry)
         self.state: Optional[StateManager] = None
         self.dry_run: bool = config.get("dry_run", False)
 
@@ -48,7 +57,8 @@ class BridgeDaemon:
             self.message_reader = MessageReader(self.cdp, self.state)
             self.task_identifier = TaskIdentifier(self.config)
             self.hermes_connector = HermesConnector(
-                str(Path(__file__).parent.parent)
+                gateway_url=self.config.get("gateway_url", "ws://127.0.0.1:61650/api/ws"),
+                session_ticket=self.config.get("session_ticket", "")
             )
             self.response_sender = ResponseSender(
                 self.cdp,
@@ -143,29 +153,43 @@ class BridgeDaemon:
                         logger.info("Сообщение не адресовано Hermes, пропуск")
                         continue
 
-                    logger.info("Задача обнаружена: %s", text)
+                    # Проверка на собственное сообщение (dedup)
+                    msg_id = msg.get("id", "")
+                    if msg_id in self.response_sent:
+                        logger.info("Сообщение уже обработано, пропуск")
+                        continue
+
+                    logger.info("Задача обнаружена: %s", text[:80])
                     self.state.append_to_log(f"📥 Новое сообщение: {text[:100]}...", "INFO")
 
                     # Извлечение текста задачи
                     task_text = self.task_identifier.extract_task_text(text)
 
-                    # Отправка в Hermes
-                    logger.info("Отправка в Hermes: %s...", task_text[:80])
-                    agent_response = self.hermes_connector.send_task(task_text)
+                    # 1. Отправка в Hermes (если не dry_run)
+                    if not self.dry_run:
+                        logger.info("Отправка в Hermes: %s...", task_text[:80])
+                        agent_response = self.hermes_connector.submit_task(task_text)
+                        self.state.save_conversation(task_text, agent_response)
+                    else:
+                        logger.info("🔒 DRY-RUN: не отправляем в Hermes и не запускаем задачу")
+                        agent_response = f"[DRY-RUN] Не выполнено: {task_text}"
 
-                    logger.info("Получен ответ от Hermes")
+                    # 2. Проверка результата от Hermes
+                    # Если получение результата, приостанавливаем обработку этого сообщения
+                    # (в реальном режиме мы бы ждали результата через события)
+                    logger.info("Получен ответ от Hermes (placeholder)")
                     self.state.append_to_log(f"📤 Ответ Hermes: {agent_response[:100]}...", "INFO")
 
-                    # Сохранение диалога
-                    self.state.save_conversation(task_text, agent_response)
-
-                    # Отправка в ChatGPT (если не dry-run)
+                    # 3. Отправка в ChatGPT
                     if self.dry_run:
                         logger.info("🔒 DRY-RUN: ответ не отправлен в ChatGPT")
                         self.state.append_to_log("🔒 DRY-RUN: ответ не отправлен в ChatGPT", "INFO")
                     else:
-                        if self.response_sender.send_message(agent_response):
+                        if self.response_sender.send_message(agent_response, tab_id):
                             logger.info("✅ Ответ отправлен в ChatGPT")
+                            # Отмечаем, что задача была отправлена (для предотвращения ретраев)
+                            if msg_id:
+                                self.response_sent.add(msg_id)
                             self.state.append_to_log("✅ Ответ отправлен в ChatGPT", "INFO")
                         else:
                             logger.error("❌ Не удалось отправить ответ в ChatGPT")

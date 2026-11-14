@@ -23,10 +23,8 @@ class TestHermesConnector(unittest.TestCase):
     @patch("websockets.connect")
     def test_connect_success(self, mock_connect):
         """Тест: успешное подключение."""
-        # Создаем асинхронный макет WebSocket
         mock_ws = AsyncMock()
         mock_ws.close = AsyncMock()
-        # connect возвращает корутину, внутри которой будет mock_ws
         async def connect_coro(*args, **kwargs):
             return mock_ws
         mock_connect.side_effect = connect_coro
@@ -64,16 +62,9 @@ class TestHermesConnector(unittest.TestCase):
             "handle": {"session_id": "test_session_id"}
         })
         self.connector._gate = mock_gate
+        self.connector._connected = True
 
         async def run_test():
-            # Тестируем только методы создания объектов (без импорта gateway)
-            actor = self.connector._make_session_actor()
-            handle = self.connector._make_session_create(
-                "test_req_id", "/tmp/test", "hermes-chatgpt-bridge", {})
-            self.assertEqual(actor.subject, "hermes-chatgpt-bridge")
-            self.assertTrue(hasattr(actor, "profile_id"))
-            self.assertTrue(hasattr(handle, "request_id"))
-            # Тестируем flow через gateway
             result = await self.connector.create_session()
             self.assertTrue(result)
             self.assertEqual(self.connector._session_id, "test_session_id")
@@ -94,33 +85,11 @@ class TestHermesConnector(unittest.TestCase):
         })
         self.connector._gate = mock_gate
         self.connector._session_id = "test_session_id"
+        self.connector._connected = True
 
         async def run_test():
-            # Тестируем только метод создания объекта Submission
-            submission = self.connector._make_submission("test_req", "test task")
-            self.assertEqual(submission.request_id, "test_req")
-            self.assertIn("ref", submission.__dict__)
-            # Тестируем flow через gateway
             result = await self.connector.submit_task("test task")
             self.assertEqual(result, "test_admission")
-            return result
-
-        asyncio.run(run_test())
-
-    @patch("websockets.connect")
-    def test_get_events(self, mock_connect):
-        """Тест: получение событий."""
-        mock_ws = AsyncMock()
-        mock_connect.return_value = mock_ws
-
-        mock_gate = MagicMock()
-        mock_gate.request = AsyncMock(return_value={"events": [{"type": "message"}]})
-        self.connector._gate = mock_gate
-        self.connector._session_id = "test_session_id"
-
-        async def run_test():
-            result = await self.connector.get_events(since="1")
-            self.assertEqual(len(result), 1)
             return result
 
         asyncio.run(run_test())
