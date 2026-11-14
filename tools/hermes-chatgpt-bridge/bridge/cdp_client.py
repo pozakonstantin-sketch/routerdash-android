@@ -1,4 +1,7 @@
-"""CDP Client — подключение к браузеру по Chrome DevTools Protocol."""
+"""CDP Client — подключение к браузеру через Chrome DevTools Protocol.
+
+Минимальный, безопасный клиент. Только локальные подключения.
+"""
 
 import json
 import logging
@@ -25,6 +28,7 @@ class CDPClient:
     def connect(self) -> bool:
         """Подключиться к CDP-серверу."""
         try:
+            # Список целей для поиска доступных вкладок
             self.ws = websocket.create_connection(self.cdp_url, timeout=10)
             self._send({"id": 1, "method": "Target.getTargets"})
             response = self._recv()
@@ -33,7 +37,21 @@ class CDPClient:
             targets = response.get("result", [])
             if not targets:
                 raise CDPError("No browser targets found")
-            self.session_id = targets[0].get("targetId")
+
+            # Ищем ChatGPT в целях или берём первую доступную вкладку
+            self.session_id = None
+            for t in targets:
+                url = t.get("url", "")
+                if "chatgpt.com" in url or "chatgpt" in url.lower():
+                    self.session_id = t.get("targetId")
+                    logger.info("Найдена вкладка ChatGPT: %s", url)
+                    break
+
+            if self.session_id is None:
+                # Берём первую доступную вкладку
+                self.session_id = targets[0].get("targetId")
+                logger.info("Используем вкладку #%s", self.session_id)
+
             logger.info("CDP подключён. Сессия: %s", self.session_id)
             return True
         except Exception as e:
@@ -48,6 +66,7 @@ class CDPClient:
             except Exception:
                 pass
             self.ws = None
+        self.session_id = None
 
     def _send(self, message: Dict[str, Any]) -> None:
         """Отправить JSON-сообщение в CDP."""
@@ -89,6 +108,7 @@ class CDPClient:
         """Отправить синхронный CDP-вызов и получить ответ."""
         if not self.session_id:
             raise CDPError("CDP не подключен")
+
         msg_id = int(time.time() * 1000) % 100000
         self._send({"id": msg_id, "method": method, "params": params or {}})
         response = self._recv()
@@ -170,7 +190,7 @@ class CDPClient:
                 "arguments": [text],
                 "returnByValue": True
             })
-            if "not found" in result.get("result", {}).get("result", {}).get("value", ""):
+            if "not found" in str(result.get("result", {}).get("result", {}).get("value", "")):
                 logger.warning("Элемент ввода не найден")
                 return False
             # Кликаем кнопку отправки
@@ -189,7 +209,7 @@ class CDPClient:
                     })()
                 """
             })
-            value2 = result2.get("result", {}).get("result", {}).get("value", "")
+            value2 = str(result2.get("result", {}).get("result", {}).get("value", ""))
             if "not found" in value2:
                 logger.warning("Кнопка отправки не найдена")
                 return False
@@ -199,7 +219,7 @@ class CDPClient:
             return False
 
     def get_new_messages(self, since_message_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Прочитать новые сообщения из чата."""
+        """Прочитать сообщения из чата."""
         self.scroll_to_bottom()
         time.sleep(1)
         messages = []

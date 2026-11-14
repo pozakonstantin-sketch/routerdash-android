@@ -32,9 +32,9 @@ log_level: "INFO"
 log_file: "logs/bridge.log"
 
 # --- Режимы ---
-# include_quotes: false — не распознавать цитаты
-# quote_prefix: ">" — префикс цитат
-# timeout_mode: "drop" — пропускать пересохранённые сообщения
+# dry_run: true — безопасный режим, ничего не отправляется в ChatGPT
+#              и не запускаются реальные задачи
+dry_run: false
 
 # --- Безопасность ---
 # Всегда false. Никогда не включайте --disable-web-security.

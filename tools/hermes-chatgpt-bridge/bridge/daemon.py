@@ -33,30 +33,7 @@ class BridgeDaemon:
         self.hermes_connector: Optional[HermesConnector] = None
         self.response_sender: Optional[ResponseSender] = None
         self.state: Optional[StateManager] = None
-
-    def setup_logging(self) -> None:
-        """Настроить логирование."""
-        log_level = self.config.get("log_level", "INFO")
-        log_file = self.config.get("log_file", "logs/bridge.log")
-        log_path = Path(log_file)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-
-        handlers = [logging.StreamHandler(sys.stdout)]
-        if log_path.exists():
-            handlers.append(logging.FileHandler(log_path))
-
-        logging.basicConfig(
-            level=getattr(logging, log_level),
-            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-            handlers=handlers
-        )
-
-    def load_config(self, config_path: str) -> dict:
-        """Загрузить конфигурацию из YAML."""
-        import yaml
-        config_path = Path(config_path)
-        with open(config_path) as f:
-            return yaml.safe_load(f)
+        self.dry_run: bool = config.get("dry_run", False)
 
     def setup_components(self) -> bool:
         """Инициализировать компоненты моста."""
@@ -85,8 +62,8 @@ class BridgeDaemon:
     def start(self) -> bool:
         """Запустить мост."""
         self.running = True
-        logger.info("=== HERMES ChatGPT BRIDGE запущен (%-25s) ===",
-                    self.config.get("cdp_url", "?"))
+        logger.info("=== HERMES ChatGPT BRIDGE запущен (dry_run=%s) ===",
+                    self.dry_run)
         logger.info("Таймауты: connect=%ss read=%ss task=%ss",
                     self.config.get("timeout_connect", "?"),
                     self.config.get("timeout_read", "?"),
@@ -101,7 +78,7 @@ class BridgeDaemon:
         try:
             self.cdp.connect()
         except CDPError as e:
-            logger.error("❌ Не удалось подключиться к CDP: %s", e)
+            logger.error("Не удалось подключиться к CDP: %s", e)
             self.state.append_to_log(
                 f"BLOCKED: CDP не доступен – {e}",
                 "ERROR"
@@ -111,7 +88,7 @@ class BridgeDaemon:
         # 2. Поиск вкладки ChatGPT
         logger.info("Ожидание вкладки ChatGPT...")
         if not self.tab_monitor.wait_for_chatgpt(timeout=self.config.get("timeout_connect", 60)):
-            logger.error("❌ Вкладка ChatGPT не найдена")
+            logger.error("Вкладка ChatGPT не найдена")
             self.cdp.disconnect()
             self.state.append_to_log(
                 "BLOCKED: ChatGPT вкладка не найдена",
@@ -182,13 +159,17 @@ class BridgeDaemon:
                     # Сохранение диалога
                     self.state.save_conversation(task_text, agent_response)
 
-                    # Отправка в ChatGPT
-                    if self.response_sender.send_message(agent_response):
-                        logger.info("✅ Ответ отправлен в ChatGPT")
-                        self.state.append_to_log("✅ Ответ отправлен в ChatGPT", "INFO")
+                    # Отправка в ChatGPT (если не dry-run)
+                    if self.dry_run:
+                        logger.info("🔒 DRY-RUN: ответ не отправлен в ChatGPT")
+                        self.state.append_to_log("🔒 DRY-RUN: ответ не отправлен в ChatGPT", "INFO")
                     else:
-                        logger.error("❌ Не удалось отправить ответ в ChatGPT")
-                        self.state.append_to_log("❌ Отправка ответа в ChatGPT не удалась", "ERROR")
+                        if self.response_sender.send_message(agent_response):
+                            logger.info("✅ Ответ отправлен в ChatGPT")
+                            self.state.append_to_log("✅ Ответ отправлен в ChatGPT", "INFO")
+                        else:
+                            logger.error("❌ Не удалось отправить ответ в ChatGPT")
+                            self.state.append_to_log("❌ Отправка ответа в ChatGPT не удалась", "ERROR")
 
                 time.sleep(5)
 

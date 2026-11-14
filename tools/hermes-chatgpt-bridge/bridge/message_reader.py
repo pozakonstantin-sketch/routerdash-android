@@ -1,4 +1,7 @@
-"""Message Reader — чтение новых сообщений с дедупликацией."""
+"""Message Reader — чтение новых сообщений с дедупликацией.
+
+Читает сообщения ТОЛЬКО из текущего диалога ChatGPT, а не из всего DOM.
+"""
 
 import logging
 import time
@@ -16,14 +19,64 @@ class MessageReader:
     def __init__(self, cdp: CDPClient, state: StateManager):
         self.cdp = cdp
         self.state = state
-        self._last_scroll: Optional[str] = None
+        self._dialog_root: Optional[str] = None
+
+    def _find_dialog_root(self) -> Optional[str]:
+        """Найти корневой элемент диалога."""
+        if self._dialog_root:
+            return self._dialog_root
+
+        # Проверяем активную вкладку
+        tabs = self.cdp.get_targets()
+        for tab in tabs:
+            url = tab.get("url", "")
+            title = tab.get("title", "")
+            if "chatgpt.com" in url or "chatgpt" in title.lower():
+                self._dialog_root = url
+                return url
+
+        return None
 
     def read_new_messages(self, since_message_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Прочитать новые сообщения, исключая уже обработанные."""
-        messages = self.cdp.get_new_messages()
-        if not messages:
+        """Прочитать новые сообщения из текущего диалога, исключая уже обработанные."""
+        # Проверяем, что это ChatGPT-диалог
+        if not self._find_dialog_root():
+            logger.warning("Не найден ChatGPT-диалог")
             return []
 
+        messages = []
+        try:
+            # Читаем сообщения из диалога
+            result = self.cdp._send_sync("Runtime.evaluate", {
+                "expression": """
+                    (() => {
+                        const messages = [];
+                        // Ищем диалог через role="log" или data-testid="chat-dialog"
+                        const el = document.querySelector('div[role="log"], [data-testid="chat-dialog"]');
+                        if (!el) return messages;
+
+                        const items = el.querySelectorAll('[data-message-id]');
+                        for (const item of items) {
+                            const id = item.getAttribute('data-message-id');
+                            const text = item.textContent.trim();
+                            if (text && id) {
+                                messages.push({ id, text });
+                            }
+                        }
+                        return messages;
+                    })()
+                """
+            })
+
+            if result and "result" in result:
+                raw = result["result"].get("result", [])
+                if isinstance(raw, list):
+                    messages = raw
+
+        except Exception as e:
+            logger.warning("Ошибка чтения сообщений: %s", e)
+
+        # Фильтруем уже обработанные
         unique = []
         for m in messages:
             msg_id = m.get("id")
@@ -33,11 +86,12 @@ class MessageReader:
                 continue
             unique.append(m)
 
+        # Маркируем как обработанные
         for m in unique:
             self.state.mark_processed(m["id"], "chatgpt", "https://chatgpt.com")
 
         return unique
 
-    def get_all_messages(self) -> List[Dict[str, Any]]:
-        """Все сообщения (для диагностики)."""
-        return self.cdp.get_new_messages()
+    def get_dialog_messages(self) -> List[Dict[str, Any]]:
+        """Все сообщения текущего диалога (для диагностики)."""
+        return self.read_new_messages()
