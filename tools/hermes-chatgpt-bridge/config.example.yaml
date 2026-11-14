@@ -1,0 +1,43 @@
+# === Конфигурация Hermes ↔ ChatGPT Bridge ===
+# Обязательно создайте копию этого файла как config.yaml в той же папке.
+
+# --- CDP (Chrome DevTools Protocol) ---
+# URL CDP-сервера браузера. Должно быть ws://127.0.0.1:9222 для локальных браузеров.
+# Запуск браузера с CDP:
+#   open -a Yandex --args --remote-debugging-port=9222 --user-data-dir=/tmp/yandex-cdp-profile
+cdp_url: ws://127.0.0.1:9222
+
+# --- Цель (ChatGPT) ---
+# URL целевой страницы.
+target_url: https://chatgpt.com
+# CSS-селектор активного диалога. Если пусто, мост ищет диалог автоматически.
+target_dialog_selector: "#chat-header"
+
+# --- Автодополнение ---
+# Если true, мост будет автоматически создавать вкладку в ChatGPT.
+auto_create_tab: true
+
+# --- Хранилище состояния ---
+state_file: "logs/bridge_state.db"
+handshake_log: "logs/handshake.log"
+
+# --- Таймауты (секунды) ---
+timeout_connect: 10
+timeout_read: 30
+timeout_task: 300
+timeout_restart: 60
+
+# --- Логирование ---
+log_level: "INFO"
+log_file: "logs/bridge.log"
+
+# --- Режимы ---
+# include_quotes: false — не распознавать цитаты
+# quote_prefix: ">" — префикс цитат
+# timeout_mode: "drop" — пропускать пересохранённые сообщения
+
+# --- Безопасность ---
+# Всегда false. Никогда не включайте --disable-web-security.
+disable_web_security: false
+# Никогда не включать external CDP или публиковать порт 9222 в сеть.
+external_cdp: false

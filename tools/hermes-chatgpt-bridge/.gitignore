@@ -1,0 +1,8 @@
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Локальные файлы (не коммитить)
+logs/bridge.log
+logs/bridge_state.db
