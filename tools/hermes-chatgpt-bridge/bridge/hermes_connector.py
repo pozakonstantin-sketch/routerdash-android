@@ -1,170 +1,244 @@
-"""Hermes Connector — обмен задачами с постоянной сессией AI-агента.
+"""Hermes Connector — подключение к существующему gateway через JSON-RPC.
 
-Использует `hermes serve` (официальный JSON-RPC/WebSocket бэкенд) как постоянный
-сервер агента. Это официальный способ запускать агента как долгоживущий процесс
-и взаимодействовать с ним через API. Не использует `hermes chat -q` (одноразовый
-режим) как механизм постоянной сессии.
+Подключается к запущенному gateway (ws://127.0.0.1:61650/api/ws) с использованием
+официального протокола hermes-gateway-v1. Методы:
+- session.create — создать сессию
+- session.resume — восстановить сессию
+- prompt.submit — отправить задачу
+- session.events.since — читать события
+
+Подключение к существующему gateway (не запуск второго агента).
 """
 
-import logging
-import subprocess
-import time
+import asyncio
 import json
-import os
+import logging
+import time
+import uuid
 from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
 
-class HermesConnector:
-    """Клиент для отправки задач в постоянную сессию AI-агента Hermes."""
+class HermesConnectorError(Exception):
+    """Базовое исключение Connector."""
 
-    def __init__(self, bridge_dir: str, serve_host: str = "127.0.0.1",
-                 serve_port: int = 9119, api_key: Optional[str] = None):
-        self.bridge_dir = bridge_dir
-        self.serve_host = serve_host
-        self.serve_port = serve_port
-        self.api_key = api_key
-        self.server_process: Optional[subprocess.Popen] = None
-        self._session_id: Optional[str] = None
 
-    def start_server(self, timeout: int = 30) -> bool:
-        """Запустить `hermes serve` как постоянный сервер."""
-        if self.server_process and self.server_process.poll() is None:
-            logger.info("Сервер уже запущен")
-            return True
+class GatewayClient:
+    """JSON-RPC клиент для gateway (hermes-gateway-v1 protocol)."""
 
-        logger.info("Запуск `hermes serve` на %s:%d", self.serve_host, self.serve_port)
+    def __init__(self, ws, loop):
+        self.ws = ws
+        self._loop = loop
+        self.pending: Dict[int, asyncio.Future] = {}
+        self.sequence = 0
+
+    async def _reader(self):
+        import websockets
         try:
-            # Запуск в фоновом режиме с перенаправлением вывода
-            self.server_process = subprocess.Popen(
-                ["hermes", "serve", "--host", self.serve_host, "--port", str(self.serve_port)],
-                cwd=self.bridge_dir,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True
-            )
-            # Ждём готовности
-            start = time.time()
-            while time.time() - start < timeout:
-                if self.server_process.poll() is not None:
-                    logger.error("Сервер умер")
-                    return False
-                # Проверяем, что сервер отвечает
-                import urllib.request
+            async for raw in self.ws:
                 try:
-                    req = urllib.request.Request(
-                        f"http://{self.serve_host}:{self.serve_port}/",
-                        headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-                    )
-                    resp = urllib.request.urlopen(req, timeout=2)
-                    if resp.status == 200:
-                        logger.info("Сервер готов")
-                        return True
-                except Exception:
+                    frame = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if "id" in frame and frame.get("method") in (None, "response"):
+                    future = self.pending.get(frame["id"])
+                    if future is not None and not future.done():
+                        if "error" in frame:
+                            future.set_exception(HermesConnectorError(
+                                frame["error"].get("message", "request_failed")))
+                        else:
+                            future.set_result(frame.get("result", {}))
+                elif "method" in frame and frame["method"] != "notification":
+                    # Event notification
                     pass
-                time.sleep(0.5)
-            logger.error("Сервер не запустился за %d секунд", timeout)
-            return False
-        except Exception as e:
-            logger.error("Ошибка запуска сервера: %s", e)
-            return False
+        except (asyncio.CancelledError, websockets.exceptions.ConnectionClosed):
+            pass
 
-    def stop_server(self) -> None:
-        """Остановить сервер."""
-        if self.server_process:
-            try:
-                self.server_process.terminate()
-                self.server_process.wait(timeout=5)
-            except Exception:
-                pass
-            self.server_process = None
+    async def request(self, method: str, *, _timeout: float = 30.0, **params) -> Dict[str, Any]:
+        """Отправить JSON-RPC запрос и дождаться ответа по ID."""
+        id_ = self.sequence
+        self.sequence += 1
 
-    def send_task(self, task: str, timeout: int = 300) -> str:
-        """Отправить задачу в постоянную сессию и получить ответ.
-
-        Реализует взаимодействие через JSON-RPC API сервера `hermes serve`.
-        """
-        if not self.server_process or self.server_process.poll() is not None:
-            if not self.start_server():
-                return "[Ошибка: сервер не запущен]"
-
-        # Проверка сессии
-        if not self._session_id:
-            self._session_id = self._create_session()
-
-        try:
-            # Отправляем задачу через API
-            task_payload = {
-                "type": "user_message",
-                "text": task,
-                "session_id": self._session_id
-            }
-            logger.info("Отправка задачи в сессию %s", self._session_id)
-            response = self._api_call("send_task", task_payload)
-            return response.get("response", "[Ошибка: нет ответа]")
-        except Exception as e:
-            logger.error("Ошибка API: %s", e)
-            return f"[Ошибка: {e}]"
-
-    def _create_session(self) -> str:
-        """Создать или получить существующую сессию."""
-        try:
-            # Проверяем существующие сессии
-            self._api_call("list_sessions", {})
-            return "persistent_session"  # Идентификатор постоянной сессии
-        except Exception as e:
-            logger.warning("Не удалось получить список сессий: %s", e)
-            return "persistent_session"
-
-    def _api_call(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Вызвать метод API сервера `hermes serve`."""
-        import urllib.request
-        import urllib.error
-
-        url = f"http://{self.serve_host}:{self.serve_port}/{method}"
-        headers = {}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-
-        # Данные запроса
-        data = {
+        request = {
             "jsonrpc": "2.0",
+            "id": id_,
             "method": method,
-            "params": params,
-            "id": 1
+            "params": params
         }
-        data_bytes = json.dumps(data).encode("utf-8")
 
-        req = urllib.request.Request(
-            url,
-            data=data_bytes,
-            headers=headers,
-            method="POST"
-        )
+        future = self._loop.create_future()
+        self.pending[id_] = future
 
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-                return result.get("result", result)
-        except urllib.error.HTTPError as e:
-            error_text = e.read().decode("utf-8", errors="replace")
-            logger.error("HTTP ошибка: %s %s", e.code, error_text[:200])
-            raise Exception(f"HTTP {e.code}: {error_text[:200]}")
-        except Exception as e:
-            logger.error("Ошибка запроса: %s", e)
+            await self.ws.send(json.dumps(request))
+            try:
+                response = await asyncio.wait_for(future, timeout=_timeout)
+                return response
+            except asyncio.TimeoutError:
+                del self.pending[id_]
+                raise HermesConnectorError(f"Таймаут ожидания ответа для {method}")
+        except Exception:
+            del self.pending[id_]
             raise
 
-    def is_healthy(self) -> bool:
-        """Проверить здоровье сервера."""
+    def close(self):
+        if self.ws:
+            self.ws.close()
+
+
+class HermesConnector:
+    """Клиент для подключения к существующему gateway через JSON-RPC."""
+
+    GATEWAY_WS_PROTOCOL = "hermes-gateway-v1"
+    GATEWAY_WS_TICKET_PREFIX = "hermes-gateway-ticket."
+
+    def __init__(
+        self,
+        gateway_url: str,
+        session_ticket: str,
+        gateway_host: str = "127.0.0.1",
+        gateway_port: int = 61650,
+        timeout: float = 30.0,
+    ):
+        self.gateway_url = gateway_url
+        self.session_ticket = session_ticket
+        self.timeout = timeout
+        self._ws = None
+        self._gate = None
+        self._loop = None
+        self._session_id: Optional[str] = None
+        self._run_task: Optional[asyncio.Task] = None
+
+    async def connect(self) -> bool:
+        """Подключиться к gateway через WebSocket."""
         try:
-            import urllib.request
-            req = urllib.request.Request(
-                f"http://{self.serve_host}:{self.serve_port}/",
-                headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+            import websockets
+            self._loop = asyncio.get_event_loop()
+            self._ws = await websockets.connect(
+                self.gateway_url,
+                subprotocols=[
+                    self.GATEWAY_WS_PROTOCOL,
+                    self.GATEWAY_WS_TICKET_PREFIX + self.session_ticket
+                ],
+                open_timeout=10.0
             )
-            resp = urllib.request.urlopen(req, timeout=5)
-            return resp.status == 200
-        except Exception:
+            self._gate = GatewayClient(self._ws, self._loop)
+            self._run_task = asyncio.ensure_future(self._gate._reader())
+            return True
+        except Exception as e:
+            logger.error("Ошибка подключения к gateway: %s", e)
             return False
+
+    async def create_session(self, cwd: str = None, source: str = "hermes-chatgpt-bridge") -> bool:
+        """Создать сессию через session.create."""
+        if not self._gate:
+            raise HermesConnectorError("Gateway не подключён")
+
+        request_id = str(uuid.uuid4())
+        session_create = {
+            "request_id": request_id,
+            "cwd": cwd or "/Users/konstantin/Тест",
+            "source": source,
+            "policy": {}
+        }
+
+        # Создаём объекты SessionActor и SessionCreate (без импорта из gateway,
+        # чтобы избежать зависимости от версии Gateway SDK)
+        actor = self._make_session_actor()
+        handle = self._make_session_create(request_id, cwd, source, session_create["policy"])
+
+        try:
+            result = await self._gate.request(
+                "session.create", actor=actor, request=handle)
+            self._session_id = result.get("session_id") or result.get("handle", {}).get("session_id")
+            return True
+        except Exception as e:
+            logger.error("Ошибка session.create: %s", e)
+            return False
+
+    def _make_session_actor(self):
+        """Создать SessionActor (фэйковый объект для тестов)."""
+        class SessionActor:
+            def __init__(self, **kwargs):
+                self.subject = kwargs.get("subject", "hermes-chatgpt-bridge")
+                self.profile_id = kwargs.get("profile_id", "/Users/konstantin/.hermes")
+                self.capabilities = kwargs.get("capabilities", frozenset())
+                self.transport_id = kwargs.get("transport_id", "bridge")
+        return SessionActor(
+            subject="hermes-chatgpt-bridge",
+            profile_id="/Users/konstantin/.hermes",
+            capabilities=frozenset(),
+            transport_id="bridge"
+        )
+
+    def _make_session_create(self, request_id, cwd, source, policy):
+        """Создать SessionCreate (фэйковый объект для тестов)."""
+        class SessionCreate:
+            def __init__(self, **kwargs):
+                self.request_id = kwargs.get("request_id", request_id)
+                self.cwd = kwargs.get("cwd", cwd or "/Users/konstantin/Тест")
+                self.source = kwargs.get("source", source)
+                self.policy = kwargs.get("policy", {})
+        return SessionCreate(
+            request_id=request_id,
+            cwd=cwd or "/Users/konstantin/Тест",
+            source=source,
+            policy=policy
+        )
+
+    async def submit_task(self, task: str) -> str:
+        """Отправить задачу в сессию через prompt.submit."""
+        if not self._gate:
+            raise HermesConnectorError("Gateway не подключён")
+
+        request_id = str(uuid.uuid4())
+
+        # Создаём объект Submission (фэйковый объект для тестов)
+        submission = self._make_submission(request_id, task)
+
+        try:
+            result = await self._gate.request(
+                "prompt.submit", request=submission)
+            return result.get("admission_id") or result.get("outcome", "")
+        except Exception as e:
+            logger.error("Ошибка prompt.submit: %s", e)
+            return f"[Ошибка: {e}]"
+
+    def _make_submission(self, request_id, task):
+        """Создать Submission (фэйковый объект для тестов)."""
+        session_id = self._session_id or "unknown_session"
+        class Submission:
+            def __init__(self, **kwargs):
+                self.request_id = kwargs.get("request_id", request_id)
+                self.ref = kwargs.get("ref", {"profile_id": "/Users/konstantin/.hermes", "session_id": session_id})
+                self.payload = kwargs.get("payload", {"text": task, "toolset": "default"})
+                self.intent = kwargs.get("intent", "queue")
+        return Submission(
+            request_id=request_id,
+            ref={"profile_id": "/Users/konstantin/.hermes", "session_id": session_id},
+            payload={"text": task},
+            intent="queue"
+        )
+
+    async def get_events(self, since: str = None) -> list:
+        """Получить события сессии через session.events.since."""
+        if not self._gate:
+            raise HermesConnectorError("Gateway не подключён")
+
+        try:
+            result = await self._gate.request(
+                "session.events.since",
+                ref={"profile_id": "/Users/konstantin/.hermes", "session_id": self._session_id},
+                since=since
+            )
+            return result.get("events", [])
+        except Exception as e:
+            logger.error("Ошибка events: %s", e)
+            return []
+
+    async def close(self):
+        if self._ws:
+            await self._ws.close()
+        if self._gate:
+            self._gate.close()
