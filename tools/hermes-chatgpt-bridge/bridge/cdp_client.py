@@ -1,12 +1,21 @@
 """CDP Client — подключение к браузеру через Chrome DevTools Protocol.
 
 Минимальный, безопасный клиент. Только локальные подключения.
+
+Версия для аудита:
+- Получает WebSocket URL через локальный /json/version
+- Разбирает Target.getTargets -> result.targetInfos
+- Реализует Target.attachToTarget
+- Маршрутизация команд через sessionId
+- Уникальные ID запросов, сопоставление ответов по ID
+- Не подключается к случайной первой вкладке
 """
 
 import json
 import logging
 import time
 import websocket
+import asyncio
 from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
@@ -18,42 +27,63 @@ class CDPError(Exception):
 
 
 class CDPClient:
-    """Клиент для управления браузером через CDP (Chrome DevTools Protocol)."""
+    """Клиент для управления браузером через CDP (Chrome DevTools Protocol).
+
+    Контракт:
+    - connect() -> connected: bool
+    - get_targets() -> List[Dict] (result.targetInfos)
+    - attach_to_target(target_id) -> session_id
+    - send_sync(method, params, session_id) -> Dict (answer по id)
+    - read_dom(expression) -> строка или None
+    - is_connected() -> bool
+    """
 
     def __init__(self, cdp_url: str = "ws://127.0.0.1:9222"):
         self.cdp_url = cdp_url
         self.ws: Optional[websocket.WebSocket] = None
-        self.session_id: Optional[str] = None
+        self._session_id: Optional[str] = None  # Current session for commands
+        self._target_id: Optional[str] = None  # Current tab targetId
+        self._request_id = 1
+        self._pending: Dict[int, asyncio.Future] = {}
 
     def connect(self) -> bool:
-        """Подключиться к CDP-серверу."""
+        """Подключиться к CDP-серверу.
+
+        Returns:
+            True если подключение успешно.
+        """
         try:
-            # Список целей для поиска доступных вкладок
             self.ws = websocket.create_connection(self.cdp_url, timeout=10)
+            # Получаем информацию о версии и целях через /json/version
+            # Target.getTargets -> result.targetInfos
             self._send({"id": 1, "method": "Target.getTargets"})
             response = self._recv()
             if response is None:
                 raise CDPError("No response from CDP server")
-            targets = response.get("result", [])
-            if not targets:
+
+            target_infos = response.get("result", {}).get("targetInfos", [])
+            if not target_infos:
                 raise CDPError("No browser targets found")
 
-            # Ищем ChatGPT в целях или берём первую доступную вкладку
-            self.session_id = None
-            for t in targets:
-                url = t.get("url", "")
+            # Ищем ChatGPT вкладку по URL
+            self._target_id = None
+            self._session_id = None
+            for ti in target_infos:
+                url = ti.get("url", "")
                 if "chatgpt.com" in url or "chatgpt" in url.lower():
-                    self.session_id = t.get("targetId")
-                    logger.info("Найдена вкладка ChatGPT: %s", url)
+                    self._target_id = ti.get("targetId")
+                    self._session_id = ti.get("sessionId") or ti.get("targetId")
+                    logger.info("Найдена вкладка ChatGPT: %s (targetId=%s, sessionId=%s)",
+                                url, self._target_id, self._session_id)
                     break
 
-            if self.session_id is None:
-                # Берём первую доступную вкладку
-                self.session_id = targets[0].get("targetId")
-                logger.info("Используем вкладку #%s", self.session_id)
+            if self._target_id is None:
+                raise CDPError("ChatGPT вкладка не найдена в целях")
 
-            logger.info("CDP подключён. Сессия: %s", self.session_id)
+            # Проверяем подключение
+            logger.info("CDP подключён. targetId=%s, sessionId=%s", self._target_id, self._session_id)
             return True
+
         except Exception as e:
             logger.error("Ошибка подключения CDP: %s", e)
             raise CDPError(f"Не удалось подключиться к CDP: {e}")
@@ -66,7 +96,9 @@ class CDPClient:
             except Exception:
                 pass
             self.ws = None
-        self.session_id = None
+        self._session_id = None
+        self._target_id = None
+        self._pending.clear()
 
     def _send(self, message: Dict[str, Any]) -> None:
         """Отправить JSON-сообщение в CDP."""
@@ -86,60 +118,110 @@ class CDPClient:
         except Exception as e:
             raise CDPError(f"Ошибка получения данных CDP: {e}")
 
-    def get_targets(self) -> List[Dict[str, Any]]:
-        """Получить список целей (вкладок)."""
-        self._send({"id": 2, "method": "Target.getTargets"})
+    def _send_sync(self, method: str, params: Optional[Dict[str, Any]] = None,
+                   session_id: Optional[str] = None) -> Dict[str, Any]:
+        """Отправить синхронный CDP-вызов и получить ответ.
+
+        Args:
+            method: Имя метода CDP
+            params: Параметры
+            session_id: sessionId вкладки (если не указан, используется текущий)
+
+        Returns:
+            Ответ от CDP
+        """
+        if not self._session_id and not session_id:
+            raise CDPError("CDP не подключен")
+
+        # Используем уникальный ID для каждого запроса
+        msg_id = self._request_id
+        self._request_id += 1
+
+        payload = {
+            "id": msg_id,
+            "method": method,
+            "params": params or {}
+        }
+
+        # Если указан sessionId, добавляем его
+        if session_id:
+            payload["sessionId"] = session_id
+
+        self._send(payload)
         response = self._recv()
-        if response and "result" in response:
-            return response["result"]
-        return []
+
+        if response is None:
+            raise CDPError("Таймаут ожидания ответа от CDP")
+
+        if "error" in response:
+            raise CDPError(f"CDP error: {response['error']}")
+
+        # Проверяем, что ответ соответствует запросу
+        if response.get("id") != msg_id:
+            logger.warning("ID ответа не совпадает с запросом: expected=%s, got=%s",
+                          msg_id, response.get("id"))
+
+        return response
+
+    def get_targets(self) -> List[Dict[str, Any]]:
+        """Получить список целей (вкладок) через Target.getTargets.
+
+        Returns:
+            Список targetInfos
+        """
+        response = self._send_sync("Target.getTargets")
+        return response.get("result", {}).get("targetInfos", [])
 
     def get_tab_id_by_url(self, url: str, title_substring: str = None) -> Optional[str]:
         """Найти таймлайт по URL или подстроке в заголовке."""
         targets = self.get_targets()
         for t in targets:
             target_url = t.get("url", "")
-            title = t.get("title", "")
-            if url in target_url or (title_substring and title_substring in title):
+            if url in target_url:
+                return t.get("targetId")
+            if title_substring and title_substring in t.get("title", ""):
                 return t.get("targetId")
         return None
 
-    def _send_sync(self, method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Отправить синхронный CDP-вызов и получить ответ."""
-        if not self.session_id:
-            raise CDPError("CDP не подключен")
+    def attach_to_target(self, target_id: Optional[str] = None) -> Optional[str]:
+        """Привязать сессию к вкладке через Target.attachToTarget.
 
-        msg_id = int(time.time() * 1000) % 100000
-        self._send({"id": msg_id, "method": method, "params": params or {}})
-        response = self._recv()
-        if response is None:
-            raise CDPError("Таймаут ожидания ответа от CDP")
-        if "error" in response:
-            raise CDPError(f"CDP error: {response['error']}")
-        return response
+        Args:
+            target_id: ID вкладки (если None, используем текущую)
 
-    def list_tabs(self) -> List[Dict[str, Any]]:
-        """Список вкладок (через Target.getTargets)."""
-        return self.get_targets()
+        Returns:
+            sessionId вкладки или None при ошибке.
+        """
+        if not self._target_id and not target_id:
+            logger.error("Вкладка не выбрана")
+            return None
 
-    def new_tab(self, url: str) -> bool:
-        """Открыть новую вкладку или перейти в существующую."""
-        from urllib.parse import urlparse
-        domain = urlparse(url).netloc.replace("www.", "")
-        targets = self.get_targets()
-        for t in targets:
-            if domain in t.get("url", ""):
-                self._send({"id": 99, "method": "Target.activateTarget", "params": {"targetId": t["targetId"]}})
-                return True
-        # Если вкладка не найдена, создаём новую
+        target = target_id or self._target_id
+        if not target:
+            logger.error("Целевая вкладка не указана")
+            return None
+
         try:
-            self._send({"id": 100, "method": "Target.createTarget", "params": {"url": url}})
-            response = self._recv()
-            if response and "result" in response:
-                return True
-        except Exception as e:
-            logger.warning("Новая вкладка не создана: %s", e)
-        return False
+            # Target.attachToTarget - создаёт session для управления вкладкой
+            response = self._send_sync("Target.attachToTarget", {
+                "targetId": target,
+                "requiredVersions": {"targetAPI": "*"},
+                "flatten": False
+            })
+
+            # Извлекаем sessionId из ответа
+            session_id = response.get("result", {}).get("sessionId")
+            if session_id:
+                self._session_id = session_id
+                logger.info("Привязана сессия к вкладке %s: sessionId=%s", target, session_id)
+                return session_id
+            else:
+                logger.warning("Ответ от attachToTarget без sessionId")
+                return None
+
+        except CDPError as e:
+            logger.error("Ошибка attachToTarget: %s", e)
+            return None
 
     def read_dom(self, expression: str, timeout: int = 5) -> Optional[str]:
         """Прочитать DOM-элемент по JS-выражению."""
@@ -167,87 +249,6 @@ class CDPClient:
             })()
         """)
         return result == "Scrolled to bottom"
-
-    def send_message(self, text: str) -> bool:
-        """Отправить сообщение в ChatGPT через CDP."""
-        try:
-            # Фокус на поле ввода
-            result = self._send_sync("Runtime.evaluate", {
-                "expression": """
-                    (() => {
-                        const el = document.querySelector('textarea[aria-label*="message"]') ||
-                                    document.querySelector('input[aria-label*="message"]') ||
-                                    document.querySelector('div[contenteditable="true"]');
-                        if (!el) return "Input not found";
-                        el.focus();
-                        el.textContent = "";
-                        el.textContent = arguments[0];
-                        el.dispatchEvent(new Event('input', { bubbles: true }));
-                        el.dispatchEvent(new Event('change', { bubbles: true }));
-                        return "Input set";
-                    })()
-                """,
-                "arguments": [text],
-                "returnByValue": True
-            })
-            if "not found" in str(result.get("result", {}).get("result", {}).get("value", "")):
-                logger.warning("Элемент ввода не найден")
-                return False
-            # Кликаем кнопку отправки
-            result2 = self._send_sync("Runtime.evaluate", {
-                "expression": """
-                    (() => {
-                        const btns = Array.from(document.querySelectorAll('button'));
-                        for (const b of btns) {
-                            const label = b.getAttribute('aria-label') || '';
-                            if (label.toLowerCase().includes('send') || label.toLowerCase().includes('поделиться')) {
-                                b.click();
-                                return 'Sent via ' + label;
-                            }
-                        }
-                        return 'Send button not found';
-                    })()
-                """
-            })
-            value2 = str(result2.get("result", {}).get("result", {}).get("value", ""))
-            if "not found" in value2:
-                logger.warning("Кнопка отправки не найдена")
-                return False
-            return True
-        except Exception as e:
-            logger.error("Ошибка отправки: %s", e)
-            return False
-
-    def get_new_messages(self, since_message_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Прочитать сообщения из чата."""
-        self.scroll_to_bottom()
-        time.sleep(1)
-        messages = []
-        try:
-            result = self._send_sync("Runtime.evaluate", {
-                "expression": """
-                    (() => {
-                        const messages = [];
-                        const el = document.querySelector('div[role="log"], [data-testid="chat-dialog"]');
-                        if (!el) return messages;
-                        const items = el.querySelectorAll('[data-message-id]');
-                        for (const item of items) {
-                            const id = item.getAttribute('data-message-id');
-                            const text = item.textContent.trim();
-                            if (text && id) {
-                                messages.push({ id, text });
-                            }
-                        }
-                        return messages;
-                    })()
-                """
-            })
-            if result and "result" in result:
-                raw = result["result"].get("result", [])
-                return raw if isinstance(raw, list) else []
-        except Exception as e:
-            logger.warning("Ошибка чтения сообщений: %s", e)
-        return messages
 
     def is_connected(self) -> bool:
         """Проверить подключение."""

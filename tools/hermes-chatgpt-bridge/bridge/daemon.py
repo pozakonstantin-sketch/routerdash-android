@@ -1,11 +1,13 @@
 """Bridge Daemon — главный демон моста Hermes ↔ ChatGPT.
 
 Основные требования:
-- dry_run=true не запускает Hermes, не отправляет сообщения в ChatGPT, не выполняет внешние действия
-- Не терять задачи при ошибках и перезапуске (StateManager хранит pending задачи)
-- Не обрабатывать собственные ответы как новые задачи
-- Не отправлять одну задачу повторно (dedup через message_id)
-- Передавать результат Hermes в ChatGPT только после подтверждённого завершения задачи
+- Получить безопасные параметры подключения к существующему Gateway
+- connect() → create_session() → submit_task() → get_task_result()
+- Проверить фактическое завершение
+- Передать только готовый результат в ResponseSender
+
+- dry_run=true: ни одного обращения к Hermes, ни одной отправки в ChatGPT
+- Сохранять контекст переписки и продолжать после перезапуска
 """
 
 import argparse
@@ -21,9 +23,9 @@ from .cdp_client import CDPClient, CDPError
 from .tab_monitor import TabMonitor
 from .message_reader import MessageReader
 from .task_identifier import TaskIdentifier
-from .hermes_connector import HermesConnector
+from .hermes_connector import HermesConnector, HermesConnectorError
 from .response_sender import ResponseSender
-from .state_manager import StateManager
+from .state_manager import StateManager, STATE_NEW, STATE_PROCESSING, STATE_SUBMITTED, STATE_RESPONSE_READY, STATE_SENT, STATE_FAILED
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +42,6 @@ class BridgeDaemon:
         self.task_identifier: Optional[TaskIdentifier] = None
         self.hermes_connector: Optional[HermesConnector] = None
         self.response_sender: Optional[ResponseSender] = None
-        self.response_sent: set = set()  # Set for tracking tasks already sent (no retry)
         self.state: Optional[StateManager] = None
         self.dry_run: bool = config.get("dry_run", False)
 
@@ -74,6 +75,19 @@ class BridgeDaemon:
         self.running = True
         logger.info("=== HERMES ChatGPT BRIDGE запущен (dry_run=%s) ===",
                     self.dry_run)
+
+        # 1. Быстрая проверка dry_run до подключения к каким-либо внешним ресурсам
+        if self.dry_run:
+            logger.info("🔒 DRY-RUN OFFLINE: блокировка всех внешних операций")
+            logger.info("   - Не подключение к CDP")
+            logger.info("   - Не поиск вкладок ChatGPT")
+            logger.info("   - Не чтение сообщений")
+            logger.info("   - Не отправка в Hermes")
+            logger.info("   - Не отправка в ChatGPT")
+            logger.info("   - Только анализ кода и тестирование")
+            self.state.append_to_log("🔒 DRY-RUN OFFLINE: блокировка всех внешних операций", "INFO")
+            return True
+
         logger.info("Таймауты: connect=%ss read=%ss task=%ss",
                     self.config.get("timeout_connect", "?"),
                     self.config.get("timeout_read", "?"),
@@ -89,10 +103,7 @@ class BridgeDaemon:
             self.cdp.connect()
         except CDPError as e:
             logger.error("Не удалось подключиться к CDP: %s", e)
-            self.state.append_to_log(
-                f"BLOCKED: CDP не доступен – {e}",
-                "ERROR"
-            )
+            self.state.append_to_log(f"BLOCKED: CDP не доступен – {e}", "ERROR")
             return False
 
         # 2. Поиск вкладки ChatGPT
@@ -100,10 +111,7 @@ class BridgeDaemon:
         if not self.tab_monitor.wait_for_chatgpt(timeout=self.config.get("timeout_connect", 60)):
             logger.error("Вкладка ChatGPT не найдена")
             self.cdp.disconnect()
-            self.state.append_to_log(
-                "BLOCKED: ChatGPT вкладка не найдена",
-                "ERROR"
-            )
+            self.state.append_to_log("BLOCKED: ChatGPT вкладка не найдена", "ERROR")
             return False
 
         logger.info("✅ Вкладка ChatGPT найдена")
@@ -153,47 +161,78 @@ class BridgeDaemon:
                         logger.info("Сообщение не адресовано Hermes, пропуск")
                         continue
 
-                    # Проверка на собственное сообщение (dedup)
-                    msg_id = msg.get("id", "")
-                    if msg_id in self.response_sent:
-                        logger.info("Сообщение уже обработано, пропуск")
-                        continue
-
-                    logger.info("Задача обнаружена: %s", text[:80])
-                    self.state.append_to_log(f"📥 Новое сообщение: {text[:100]}...", "INFO")
-
                     # Извлечение текста задачи
                     task_text = self.task_identifier.extract_task_text(text)
 
+                    # Проверка на пустую задачу
+                    if not task_text:
+                        logger.warning("Пустая задача, пропуск")
+                        continue
+
+                    # Создание задачи в StateManager
+                    task = self.state.create_task(msg.get("id", ""), task_text)
+                    logger.info("📥 Задача создана: task_id=%s", task)
+
                     # 1. Отправка в Hermes (если не dry_run)
-                    if not self.dry_run:
-                        logger.info("Отправка в Hermes: %s...", task_text[:80])
-                        agent_response = self.hermes_connector.submit_task(task_text)
-                        self.state.save_conversation(task_text, agent_response)
-                    else:
-                        logger.info("🔒 DRY-RUN: не отправляем в Hermes и не запускаем задачу")
-                        agent_response = f"[DRY-RUN] Не выполнено: {task_text}"
-
-                    # 2. Проверка результата от Hermes
-                    # Если получение результата, приостанавливаем обработку этого сообщения
-                    # (в реальном режиме мы бы ждали результата через события)
-                    logger.info("Получен ответ от Hermes (placeholder)")
-                    self.state.append_to_log(f"📤 Ответ Hermes: {agent_response[:100]}...", "INFO")
-
-                    # 3. Отправка в ChatGPT
+                    agent_response = None
                     if self.dry_run:
+                        logger.info("🔒 DRY-RUN: не выполняем задачу")
+                        self.state.mark_task_failed(task, "DRY-RUN режим")
+                        self.state.append_to_log("🔒 DRY-RUN: задача не выполнена", "INFO")
+                        continue
+
+                    # 2. Полная последовательность: connect → create_session → submit_task → get_task_result
+                    try:
+                        # Подключаемся к Gateway
+                        self.hermes_connector.connect()
+                        logger.info("✅ Подключение к Gateway")
+
+                        # Создаём/восстанавливаем сессию
+                        self.hermes_connector.create_session()
+                        logger.info("✅ Сессия создана")
+
+                        # Отправляем задачу
+                        self.hermes_connector.submit_task(task_text)
+                        logger.info("✅ Задача отправлена")
+
+                        # Дожидаемся результата
+                        result = self.hermes_connector.get_task_result(task, timeout=self.config.get("timeout_task", 60))
+                        if result:
+                            logger.info("✅ Результат получен от Gateway")
+                            agent_response = result
+                            self.state.mark_task_response_ready(task, result)
+                            self.state.append_to_log(f"📤 Результат от Gateway: {str(result)[:100]}...", "INFO")
+                        else:
+                            logger.error("❌ Не удалось получить результат от Gateway")
+                            self.state.mark_task_failed(task, "Не удалось получить результат")
+                            self.state.append_to_log("❌ Ошибка получения результата от Gateway", "ERROR")
+
+                    except HermesConnectorError as e:
+                        logger.error("❌ Ошибка HermesConnector: %s", e)
+                        self.state.mark_task_failed(task, str(e))
+                        self.state.append_to_log(f"❌ Ошибка Gateway: {e}", "ERROR")
+                    except Exception as e:
+                        logger.error("❌ Непредвиденная ошибка: %s", e)
+                        self.state.mark_task_failed(task, str(e))
+                        self.state.append_to_log(f"❌ Непредвиденная ошибка: {e}", "ERROR")
+
+                    # 3. Отправка в ChatGPT (если не dry_run)
+                    if not self.dry_run:
+                        if agent_response:
+                            # Отправляем готовый результат
+                            if self.response_sender.send_message(agent_response, tab_id):
+                                logger.info("✅ Ответ отправлен в ChatGPT")
+                                self.state.mark_task_sent(task)
+                                self.state.append_to_log("✅ Ответ отправлен в ChatGPT", "INFO")
+                            else:
+                                logger.error("❌ Не удалось отправить ответ в ChatGPT")
+                                self.state.mark_task_failed(task, "Ошибка отправки в ChatGPT")
+                                self.state.append_to_log("❌ Отправка ответа в ChatGPT не удалась", "ERROR")
+                        else:
+                            logger.warning("⚠️  Нет результата для отправки")
+                    else:
                         logger.info("🔒 DRY-RUN: ответ не отправлен в ChatGPT")
                         self.state.append_to_log("🔒 DRY-RUN: ответ не отправлен в ChatGPT", "INFO")
-                    else:
-                        if self.response_sender.send_message(agent_response, tab_id):
-                            logger.info("✅ Ответ отправлен в ChatGPT")
-                            # Отмечаем, что задача была отправлена (для предотвращения ретраев)
-                            if msg_id:
-                                self.response_sent.add(msg_id)
-                            self.state.append_to_log("✅ Ответ отправлен в ChatGPT", "INFO")
-                        else:
-                            logger.error("❌ Не удалось отправить ответ в ChatGPT")
-                            self.state.append_to_log("❌ Отправка ответа в ChatGPT не удалась", "ERROR")
 
                 time.sleep(5)
 

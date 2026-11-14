@@ -1,55 +1,49 @@
-"""Тесты для TaskIdentifier."""
+"""Тесты для TaskIdentifier - распознавание задач."""
 
-import pytest
+import os
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools", "hermes-chatgpt-bridge"))
 
 from bridge.task_identifier import TaskIdentifier
 
 
 class TestTaskIdentifier:
-    """Тесты распознавания задач."""
+    """Тесты для TaskIdentifier."""
 
-    def test_default_config(self):
-        cfg = {}
-        ti = TaskIdentifier(cfg)
-        assert ti.include_quotes is False
+    def test_identify_task(self):
+        """Тест: распознавание адресованных к Hermes сообщений."""
+        identifier = TaskIdentifier({})
 
-    def test_task_with_prefix(self):
-        """Тест: сообщение с префиксом HERMES — задача."""
-        cfg = {}
-        ti = TaskIdentifier(cfg)
-        assert ti.is_task("HERMES помоги мне")
-        assert ti.is_task("хермес проверь это")
+        # Тест: сообщение с префиксом HERMES
+        assert identifier.is_task("HERMES В задаче: простой текст") is True
 
-    def test_task_with_emoticon(self):
-        """Тест: сообщение с 🤖 — задача."""
-        cfg = {}
-        ti = TaskIdentifier(cfg)
-        assert ti.is_task("🤖 проверь это")
+        # Тест: сообщение с префиксом ХЕРМЕС
+        assert identifier.is_task("ХЕРМЕС: задача") is True
 
-    def test_normal_message_not_task(self):
-        """Тест: обычное сообщение — не задача."""
-        cfg = {}
-        ti = TaskIdentifier(cfg)
-        assert not ti.is_task("Привет, как дела?")
-        assert not ti.is_task("Какой сегодня прогноз погоды?")
+        # Тест: сообщение с меткой [задача]
+        assert identifier.is_task("[задача]: простой текст") is True
 
-    def test_quote_with_task(self):
-        """Тест: цитата с задачей."""
-        cfg = {"include_quotes": True, "quote_prefix": ">"}
-        ti = TaskIdentifier(cfg)
-        assert ti.is_task("> HERMES помоги")
-        assert not ti.is_task("> Просто цитата без задачи")
+        # Тест: сообщение с меткой TASK:
+        assert identifier.is_task("TASK: простой текст") is True
+
+        # Тест: сообщение без адресации
+        assert identifier.is_task("Это обычное сообщение") is False
+
+        # Тест: пустое сообщение
+        assert identifier.is_task("") is False
 
     def test_extract_task_text(self):
         """Тест: извлечение текста задачи."""
-        cfg = {}
-        ti = TaskIdentifier(cfg)
-        text = ti.extract_task_text("HERMES сделай это")
-        assert "сделай это" in text
+        identifier = TaskIdentifier({})
 
-    def test_extract_task_label(self):
-        """Тест: метка [task] удаляется."""
-        cfg = {}
-        ti = TaskIdentifier(cfg)
-        text = ti.extract_task_text("[task] проверь это")
-        assert "проверь это" in text
+        # Тест: обычное сообщение
+        result = identifier.extract_task_text("HELLOWORLD В задаче: простой текст")
+        assert "В задаче: простой текст" in result
+
+        # Тест: сообщение с меткой задачи
+        result = identifier.extract_task_text("[задача]: простой текст")
+        assert "простой текст" in result
+
+        # Тест: пустое сообщение
+        result = identifier.extract_task_text("HELLOWORLD")
+        assert result == "HELLOWORLD"

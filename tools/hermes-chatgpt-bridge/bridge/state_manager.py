@@ -1,114 +1,158 @@
-"""State Manager — SQLite-хранилище переписки с дедупликацией."""
+"""Менеджер состояния_bridge."""
 
+import os
 import json
+import threading
+import uuid
 import logging
-import sqlite3
-import hashlib
 from datetime import datetime
-from pathlib import Path
 from typing import Optional, Dict, Any, List
 
+# Настройка логирования
 logger = logging.getLogger(__name__)
 
+# Состояния задач
+STATE_NEW = "NEW"
+STATE_PROCESSING = "PROCESSING"
+STATE_SUBMITTED = "SUBMITTED"
+STATE_RESPONSE_READY = "RESPONSE_READY"
+STATE_SENT = "SENT"
+STATE_FAILED = "FAILED"
 
 class StateManager:
-    """Управление состоянием переписки (SQLite + JSONL-журнал)."""
+    """Менеджер состояния задач."""
 
-    def __init__(self, state_file: str = "logs/bridge_state.db"):
-        self.state_file = Path(state_file)
-        self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
+    def __init__(self, state_file: str, logs_dir: str = None):
+        """Инициализация менеджера состояния."""
+        self.state_file = state_file
+        self.logs_dir = logs_dir
+        self._lock = threading.Lock()
+        self._log_file = None
+        if logs_dir:
+            os.makedirs(logs_dir, exist_ok=True)
+            # Лог текущей сессии
+            self._log_file = os.path.join(logs_dir, "state_manager.log")
 
-    def _init_db(self) -> None:
-        """Инициализировать SQLite-схему."""
-        with sqlite3.connect(self.state_file) as conn:
-            conn.executescript("""
-                CREATE TABLE IF NOT EXISTS processed_messages (
-                    message_id TEXT PRIMARY KEY,
-                    source_name TEXT NOT NULL,
-                    source_url TEXT,
-                    received_at TEXT NOT NULL,
-                    processed_at TEXT NOT NULL,
-                    hash TEXT UNIQUE
-                );
-                CREATE TABLE IF NOT EXISTS conversations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT,
-                    user_message TEXT,
-                    assistant_message TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_received ON processed_messages(received_at);
-            """)
-            conn.commit()
+    def _log(self, message: str, level: str = "INFO"):
+        """Запись лога."""
+        timestamp = datetime.now().isoformat()
+        log_entry = f"[{timestamp}] [{level}] {message}\n"
+        if self._log_file:
+            try:
+                with open(self._log_file, "a", encoding="utf-8") as f:
+                    f.write(log_entry)
+            except Exception as e:
+                logger.warning(f"Не удалось записать лог: {e}")
+        logger.log(getattr(logging, level.upper(), logging.INFO), message)
 
-    def _get_hash(self, data: str) -> str:
-        """Хэш для дедупликации."""
-        return hashlib.sha256(data.encode()).hexdigest()[:16]
+    def _load_state(self) -> Dict[str, Any]:
+        """Загрузка состояния из файла."""
+        with self._lock:
+            if os.path.exists(self.state_file):
+                try:
+                    with open(self.state_file, "r", encoding="utf-8") as f:
+                        return json.load(f)
+                except Exception:
+                    pass
+            return {"tasks": {}, "next_id": 1}
 
-    def is_processed(self, message_id: str, source_name: str = "chatgpt") -> bool:
-        """Проверить, было ли сообщение обработано."""
-        with sqlite3.connect(self.state_file) as conn:
-            cur = conn.execute(
-                "SELECT 1 FROM processed_messages WHERE message_id = ?",
-                (message_id,)
-            )
-            return cur.fetchone() is not None
+    def _save_state(self, state: Dict[str, Any]):
+        """Сохранение состояния в файл."""
+        with self._lock:
+            temp_file = self.state_file + ".tmp"
+            try:
+                with open(temp_file, "w", encoding="utf-8") as f:
+                    json.dump(state, f, ensure_ascii=False, indent=2)
+                os.replace(temp_file, self.state_file)
+            except Exception as e:
+                logger.error(f"Ошибка сохранения состояния: {e}")
+                if os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except Exception:
+                        pass
 
-    def mark_processed(self, message_id: str, source_name: str = "chatgpt",
-                       source_url: str = None, content: str = None) -> None:
-        """Метка сообщения как обработанное."""
-        msg_hash = self._get_hash(message_id + source_name + str(datetime.now()))
-        received_at = datetime.now().isoformat()
-        with sqlite3.connect(self.state_file) as conn:
-            conn.execute(
-                """INSERT OR IGNORE INTO processed_messages
-                   (message_id, source_name, source_url, received_at, processed_at, hash)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (message_id, source_name, source_url, received_at, received_at, msg_hash)
-            )
-            conn.commit()
+    def create_task(self, task_id: str, message: str) -> str:
+        """Создание новой задачи."""
+        state = self._load_state()
+        task_id_int = state.get("next_id", 1)
+        state["next_id"] = task_id_int + 1
 
-    def save_conversation(self, user_message: str, assistant_message: str) -> int:
-        """Сохранить диалог в базу."""
-        now = datetime.now().isoformat()
-        with sqlite3.connect(self.state_file) as conn:
-            cur = conn.execute(
-                """INSERT INTO conversations (session_id, user_message, assistant_message, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (None, user_message[:5000], assistant_message[:5000], now, now)
-            )
-            conn.commit()
-            return cur.lastrowid
+        task = {
+            "task_id": task_id,
+            "message": message,
+            "state": STATE_NEW,
+            "admission_id": str(uuid.uuid4()),
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "result": None
+        }
+        state["tasks"][task_id] = task
+        self._save_state(state)
+        self._log(f"Создана новая задача {task_id}")
+        return task_id
 
-    def get_last_processed(self) -> Optional[Dict[str, Any]]:
-        """Получить последнее обработанное сообщение."""
-        with sqlite3.connect(self.state_file) as conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.execute(
-                "SELECT message_id, source_name, source_url, received_at FROM processed_messages ORDER BY received_at DESC LIMIT 1"
-            )
-            row = cur.fetchone()
-            return dict(row) if row else None
+    def get_task(self, task_id: int) -> Optional[Dict[str, Any]]:
+        """Получение задачи по ID."""
+        state = self._load_state()
+        return state["tasks"].get(str(task_id))
 
-    def list_all_messages(self) -> List[Dict[str, Any]]:
-        """Список всех обработанных сообщений."""
-        with sqlite3.connect(self.state_file) as conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.execute(
-                "SELECT message_id, source_name, source_url, received_at, processed_at FROM processed_messages ORDER BY received_at DESC"
-            )
-            return [dict(r) for r in cur.fetchall()]
+    def get_pending_tasks(self) -> List[Dict[str, Any]]:
+        """Получение списка ожидающих задач."""
+        state = self._load_state()
+        pending = []
+        for task_id, task in state["tasks"].items():
+            if task["state"] in (STATE_NEW, STATE_PROCESSING, STATE_SUBMITTED, STATE_RESPONSE_READY):
+                pending.append(task)
+        return pending
 
-    def append_to_log(self, message: str, level: str = "INFO") -> None:
-        """Добавить строку в JSONL-журнал handshake."""
-        log_path = self.state_file.parent / "handshake.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        entry = json.dumps({
-            "timestamp": datetime.now().isoformat(),
-            "level": level,
-            "message": message
-        }) + "\n"
-        with open(log_path, "a") as f:
-            f.write(entry)
+    def mark_task_processing(self, task_id: int):
+        """Метка задачи как обработанной."""
+        state = self._load_state()
+        if str(task_id) in state["tasks"]:
+            task = state["tasks"][str(task_id)]
+            task["state"] = STATE_PROCESSING
+            task["updated_at"] = datetime.now().isoformat()
+            self._save_state(state)
+            self._log(f"Задача {task_id} переведена в PROCESSING")
+
+    def mark_task_submitted(self, task_id: int):
+        """Метка задачи как отправленной в Hermes."""
+        state = self._load_state()
+        if str(task_id) in state["tasks"]:
+            task = state["tasks"][str(task_id)]
+            task["state"] = STATE_SUBMITTED
+            task["updated_at"] = datetime.now().isoformat()
+            self._save_state(state)
+            self._log(f"Задача {task_id} отправлена в Hermes (SUBMITTED)")
+
+    def mark_task_response_ready(self, task_id: int, result: str):
+        """Метка задачи как готовой с результатом."""
+        state = self._load_state()
+        if str(task_id) in state["tasks"]:
+            task = state["tasks"][str(task_id)]
+            task["state"] = STATE_RESPONSE_READY
+            task["result"] = result
+            task["updated_at"] = datetime.now().isoformat()
+            self._save_state(state)
+            self._log(f"Задача {task_id} готова с результатом (RESPONSE_READY)")
+
+    def mark_task_sent(self, task_id: int):
+        """Метка задачи как отправленной в ChatGPT."""
+        state = self._load_state()
+        if str(task_id) in state["tasks"]:
+            task = state["tasks"][str(task_id)]
+            task["state"] = STATE_SENT
+            task["updated_at"] = datetime.now().isoformat()
+            self._save_state(state)
+            self._log(f"Задача {task_id} отправлена в ChatGPT (SENT)")
+
+    def mark_task_failed(self, task_id: int, error: str):
+        """Метка задачи как ошибки."""
+        state = self._load_state()
+        if str(task_id) in state["tasks"]:
+            task = state["tasks"][str(task_id)]
+            task["state"] = STATE_FAILED
+            task["updated_at"] = datetime.now().isoformat()
+            self._save_state(state)
+            self._log(f"Ошибка задачи {task_id}: {error}", "ERROR")

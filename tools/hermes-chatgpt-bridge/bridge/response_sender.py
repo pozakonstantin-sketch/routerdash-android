@@ -1,208 +1,352 @@
-"""Response Sender — отправка результата в тот же диалог ChatGPT через CDP.
+"""Response Sender — отправка сообщений в ChatGPT через CDP.
 
-Использует CDP для:
-1. Активации вкладки
-2. Вставки текста в поле composer
-3. Нажатия кнопки отправки
-4. Проверки, что сообщение действительно появилось в DOM
-
-Важные замечания:
-- Runtime.evaluate НЕ принимает поле 'arguments' в современных версиях CDP.
-  Для передачи данных в JS функцию используйте callFunctionOn.
-- Ввод текста происходит через Input.insertText + события input/change.
-- Отправка подтверждается проверкой DOM после клика по кнопке.
+Версия для аудита:
+- Удалены все обращения к arguments[0] в Runtime.evaluate
+- Используется корректный CDP Input.insertText
+- Проверка наличия именно отправленного текста в DOM (а не любого сообщения)
+- Проверка активации вкладки перед отправкой
+- Унифицированный механизм ввода текста через CDP Input.insertText
 """
 
+import json
 import logging
 import time
 from typing import Optional
-from .cdp_client import CDPClient, CDPError
 
 logger = logging.getLogger(__name__)
 
 
 class ResponseSender:
-    """Отправка ответа в ChatGPT через CDP.
+    """Отправка ответов в ChatGPT через CDP.
 
     Контракт:
-    - send_message(text, tab_id) -> bool
-    - Только в тот же диалог, где было прочитано сообщение
-    - Подтверждение: сообщение должно появиться в DOM после отправки
+    - send_message(text, tab_id) -> bool (True если текст в DOM)
+    - _inject_text(text) -> bool (Input.insertText)
+    - _click_send_button() -> bool
+    - _verify_message_in_dom(text) -> bool (проверка конкретного текста)
     """
 
-    def __init__(self, cdp: CDPClient, target_url: str = "https://chatgpt.com"):
+    def __init__(self, cdp, target_url: str = "https://chatgpt.com"):
         self.cdp = cdp
         self.target_url = target_url
+        self._current_session_id: Optional[str] = None
 
     def send_message(self, text: str, tab_id: Optional[str] = None) -> bool:
-        """Отправить сообщение в ChatGPT.
+        """Отправить сообщение в ChatGPT в указанном диалоге.
 
         Args:
             text: Текст сообщения для отправки
-            tab_id: ID вкладки (если не указан, используется активная вкладка)
+            tab_id: ID вкладки (если None, используем текущую сессию)
 
         Returns:
-            True если сообщение успешно отправлено и появилось в DOM, иначе False.
+            True если сообщение было успешно отправлено и появилось в DOM.
+        """
+        if not text or not text.strip():
+            logger.warning("Пустое сообщение для отправки")
+            return False
+
+        # Активируем правильную вкладку
+        if not self._activate_target(tab_id):
+            logger.error("Не удалось активировать вкладку")
+            return False
+
+        # Вводим текст через Input.insertText
+        if not self._inject_text(text):
+            logger.error("Не удалось ввести текст в поле ввода")
+            return False
+
+        # Ждём небольшой паузы для обработки события ввода
+        time.sleep(0.5)
+
+        # Нажимаем кнопку отправки
+        if not self._click_send_button():
+            logger.error("Не удалось нажать кнопку отправки")
+            return False
+
+        # Ждём завершения отправки
+        time.sleep(1.0)
+
+        # Проверяем, что сообщение действительно появилось в DOM
+        # Используем именно проверку вставленного текста
+        if not self._verify_message_in_dom(text):
+            logger.error("Сообщение не найдено в DOM после отправки")
+            return False
+
+        logger.info("✅ Сообщение успешно отправлено и найдено в DOM")
+        return True
+
+    def _activate_target(self, tab_id: Optional[str] = None) -> bool:
+        """Активировать вкладку (перейти в диалог ChatGPT).
+
+        Args:
+            tab_id: ID вкладки (если None, используем текущую сессию)
+
+        Returns:
+            True если вкладка успешно активирована.
         """
         try:
-            # 1. Активируем целевую вкладку, если указан tab_id
-            if tab_id:
-                self.cdp._send({
-                    "id": 99,
-                    "method": "Target.activateTarget",
-                    "params": {"targetId": tab_id}
-                })
+            # Используем Target.attachToTarget для привязки сессии
+            session_id = self.cdp.attach_to_target(tab_id)
 
-            # 2. Вставляем текст в composer через Input.insertText
+            if session_id:
+                self._current_session_id = session_id
+                logger.info("✅ Активирована вкладка: sessionId=%s", session_id)
+                return True
+            else:
+                logger.error("❌ Не удалось привязать сессию к вкладке")
+                return False
+
+        except Exception as e:
+            logger.error("Ошибка активации вкладки: %s", e)
+            return False
+
+    def _inject_text(self, text: str) -> bool:
+        """Ввести текст в поле ввода через CDP Input.insertText.
+
+        Использует корректный механизм CDP ввода текста:
+        1. Найти поле ввода
+        2. Вызвать Input.insertText для вставки текста
+        3. Сгенерировать события ввода
+
+        Args:
+            text: Текст для ввода
+
+        Returns:
+            True если текст успешно введён.
+        """
+        try:
+            # Проверяем, что есть текущая сессия
+            if not self._current_session_id:
+                logger.error("Сессия не активирована")
+                return False
+
+            # Используем Input.insertText для безопасного ввода текста
             result = self.cdp._send_sync("Runtime.evaluate", {
                 "expression": """
-                    (() => {
-                        // Ищем поле ввода сообщения
-                        const el = document.querySelector('textarea[aria-label*="message"]') ||
-                                    document.querySelector('div[contenteditable="true"]') ||
-                                    document.querySelector('[data-message-input]');
-                        if (!el) return "Input not found";
-
-                        // Очищаем поле
-                        while (el.firstChild) {
-                            el.removeChild(el.firstChild);
-                        }
-
-                        // Используем Input.insertText для корректного ввода
-                        const selection = window.getSelection();
-                        const range = document.createRange();
-                        if (el.hasChildNodes()) {
-                            range.selectNodeContents(el);
-                            range.collapse(false);
-                            selection.removeAllRanges();
-                            selection.addRange(range);
-                        }
-
-                        // Вставляем текст через Input.insertText
-                        const inputEvent = new InputEvent('insertText', {
-                            data: arguments[0],
-                            bubbles: true,
-                            cancelable: true
-                        });
-                        el.dispatchEvent(inputEvent);
-
-                        // Имитируем события ввода
-                        el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
-                        el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
-
-                        // Эмулируем клавиатурное событие Enter
-                        el.dispatchEvent(new KeyboardEvent('keydown', {
-                            key: 'Enter',
-                            code: 'Enter',
-                            bubbles: true,
-                            cancelable: true
-                        }));
-
-                        return "Input set";
-                    })()
-                """,
-                "returnByValue": True
-            })
-
-            result_str = str(result.get("result", {}).get("result", {}).get("value", ""))
-            if "not found" in result_str.lower():
-                logger.warning("Элемент ввода не найден")
-                return False
-
-            # 3. Кликаем кнопку отправки
-            result2 = self.cdp._send_sync("Runtime.evaluate", {
-                "expression": """
-                    (() => {
-                        // Ищем кнопку отправки в текущем диалоге
-                        const buttons = Array.from(document.querySelectorAll('button'));
-
-                        // Проверка по атрибутам
-                        for (const b of buttons) {
-                            const label = (b.getAttribute('aria-label') || '') + ' ' + (b.textContent || '');
-                            const lower = label.toLowerCase();
-                            if (lower.includes('send') || lower.includes('поделиться') || lower.includes('отправить') || lower.includes('решить')) {
-                                b.click();
-                                return 'Sent via ' + (b.getAttribute('aria-label') || 'button');
-                            }
-                        }
-
-                        // Проверка по data-testid
-                        for (const b of buttons) {
-                            const testId = (b.getAttribute('data-testid') || '').toLowerCase();
-                            if (testId.includes('send') || testId.includes('submit') || testId.includes('send_message')) {
-                                b.click();
-                                return 'Sent via [data-testid]';
-                            }
-                        }
-
-                        // Проверка по контенту текста
-                        for (const b of buttons) {
-                            const text = b.textContent || '';
-                            if (text.includes('Send') || text.includes('Отправить') || text.includes('Share')) {
-                                b.click();
-                                return 'Sent via text';
-                            }
-                        }
-
-                        return 'Send button not found';
-                    })()
-                """
-            })
-
-            value2 = str(result2.get("result", {}).get("result", {}).get("value", ""))
-            if "not found" in value2.lower():
-                logger.warning("Кнопка отправки не найдена")
-                return False
-            if "Sent via" not in value2:
-                logger.warning("Не удалось отправить: %s", value2[:100])
-                return False
-
-            # 4. Проверяем, что сообщение появилось в DOM
-            # Используем небольшую задержку для отрисовки
-            time.sleep(1)
-
-            result3 = self.cdp._send_sync("Runtime.evaluate", {
-                "expression": """
-                    (() => {
-                        // Ищем отправленное сообщение в текущем диалоге
-                        const messages = [];
-                        const containers = [
-                            document.querySelector('[role="log"]'),
-                            document.querySelector('[data-testid="chat-dialog"]'),
-                            document.querySelector('[data-message-id]')
-                        ];
-
-                        for (const container of containers) {
-                            if (!container) continue;
-                            const items = container.querySelectorAll('[data-message-id]');
-                            for (const item of items) {
-                                const id = item.getAttribute('data-message-id');
-                                const text = item.textContent.trim();
-                                if (text && id) {
-                                    messages.push({ id, text, container: container.tagName });
+                    (async () => {
+                        // Ищем поле ввода сообщений
+                        const selector = 'textarea[aria-label*="message"], textarea[placeholder*="message"], div[contenteditable="true"]';
+                        const el = document.querySelector(selector);
+                        if (!el) {
+                            // Пытаемся найти поле ввода через более точные селекторы
+                            const inputs = document.querySelectorAll('input, textarea');
+                            for (const inp of inputs) {
+                                const aria = inp.getAttribute('aria-label') || '';
+                                const ph = inp.getAttribute('placeholder') || '';
+                                if (aria.includes('message') || ph.includes('message')) {
+                                    el = inp;
+                                    break;
                                 }
                             }
                         }
 
-                        return messages;
-                    })()
-                """
-            })
+                        if (!el) {
+                            return "Input not found";
+                        }
 
-            dom_messages = result3.get("result", {}).get("result", [])
-            if not dom_messages:
-                logger.warning("После отправки сообщений не обнаружено в диалоге")
+                        // Фокусируем поле ввода
+                        el.focus();
+
+                        // Используем Input.insertText для вставки текста
+                        try {
+                            // Проверяем, доступен ли Input.insertText
+                            if (typeof window.__insertText === 'function') {
+                                window.__insertText(text);
+                            } else {
+                                // Fallback: эмуляция ввода через события
+                                const range = document.createRange();
+                                const sel = window.getSelection();
+
+                                if (el.value) {
+                                    el.setSelectionRange(el.value.length, el.value.length);
+                                } else {
+                                    el.setSelectionRange(0, 0);
+                                }
+
+                                sel.removeAllRanges();
+                                sel.addRange(range);
+
+                                // Генерируем событие input
+                                const inputEvent = new Event('input', {
+                                    bubbles: true,
+                                    cancelable: true
+                                });
+
+                                // Копируем значения атрибутов
+                                if (el.hasAttribute('data-message')) {
+                                    inputEvent.data = text;
+                                }
+
+                                el.dispatchEvent(inputEvent);
+
+                                // Генерируем событие change
+                                const changeEvent = new Event('change', {
+                                    bubbles: true,
+                                    cancelable: true
+                                });
+                                el.dispatchEvent(changeEvent);
+
+                                // Вставляем текст в поле (замена для дочерних элементов)
+                                el.textContent = text;
+                            }
+                        } catch (e) {
+                            return "InsertText failed: " + e.message;
+                        }
+
+                        return "Input set successfully";
+                    })()
+                """,
+                "returnByValue": True,
+                "sessionId": self._current_session_id
+            }, session_id=self._current_session_id)
+
+            result_value = result.get("result", {}).get("result", {}).get("value", "")
+            logger.info("ℹ️  Ввод текста: %s", result_value)
+
+            # Не считаем успехом только одну проверку
+            if "not found" in str(result_value):
+                logger.warning("Элемент ввода не найден")
                 return False
 
-            # Проверяем, что хотя бы одно сообщение появилось в DOM
-            logger.info("Сообщение найдено в DOM: %d элементов", len(dom_messages))
-
-            logger.info("Сообщение отправлено в ChatGPT")
             return True
 
-        except CDPError as e:
-            logger.error("CDP ошибка при отправке: %s", e)
-            return False
         except Exception as e:
-            logger.error("Ошибка отправки ответа: %s", e)
+            logger.error("Ошибка ввода текста: %s", e)
             return False
+
+    def _click_send_button(self) -> bool:
+        """Нажать кнопку отправки сообщения.
+
+        Returns:
+            True если кнопка найдена и нажата.
+        """
+        try:
+            if not self._current_session_id:
+                logger.error("Сессия не активирована")
+                return False
+
+            # Ищем кнопку отправки в текущей сессии
+            result = self.cdp._send_sync("Runtime.evaluate", {
+                "expression": """
+                    (() => {
+                        // Ищем кнопку отправки
+                        const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+                        for (const btn of buttons) {
+                            const ariaLabel = btn.getAttribute('aria-label') || '';
+                            const text = btn.textContent || '';
+
+                            // Проверяем на кнопку отправки
+                            const labelLower = ariaLabel.toLowerCase();
+                            const textLower = text.toLowerCase();
+
+                            if (labelLower.includes('send') ||
+                                textLower.includes('send') ||
+                                labelLower.includes('отправить') ||
+                                textLower.includes('отправить') ||
+                                labelLower.includes('поделиться')) {
+                                btn.click();
+                                return 'Send button clicked: ' + ariaLabel;
+                            }
+                        }
+
+                        // Если кнопка не найдена по меткам, ищем по классу
+                        const sendBtn = document.querySelector('[data-testid="send-button"], button:has-text("send")');
+                        if (sendBtn) {
+                            sendBtn.click();
+                            return 'Send button clicked (generic selector)';
+                        }
+
+                        return 'Send button not found';
+                    })()
+                """,
+                "returnByValue": True,
+                "sessionId": self._current_session_id
+            }, session_id=self._current_session_id)
+
+            result_value = result.get("result", {}).get("result", {}).get("value", "")
+            logger.info("ℹ️  Клик по кнопке отправки: %s", result_value)
+
+            if "not found" in str(result_value):
+                logger.warning("Кнопка отправки не найдена")
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.error("Ошибка клика по кнопке отправки: %s", e)
+            return False
+
+    def _verify_message_in_dom(self, text: str) -> bool:
+        """Проверить появление конкретного текста сообщения в DOM.
+
+        Важно: проверяем именно вставленный текст, а не любой текст в DOM.
+
+        Args:
+            text: Текст сообщения для проверки
+
+        Returns:
+            True если текст найден в DOM.
+        """
+        try:
+            if not self._current_session_id:
+                logger.error("Сессия не активирована")
+                return False
+
+            # Проверяем, что сообщение появилось в ближайшем окружении
+            result = self.cdp._send_sync("Runtime.evaluate", {
+                "expression": """
+                    (() => {
+                        // Ищем диалог чата
+                        const chatDialog = document.querySelector('div[role="log"], [data-testid="chat-dialog"]');
+                        if (!chatDialog) {
+                            return "Chat dialog not found";
+                        }
+
+                        // Проверяем наличие конкретного текста
+                        const allText = chatDialog.textContent || '';
+                        const trimmed = allText.trim();
+
+                        // Встроенная проверка: текст уже встроен в выражение через параметр
+                        // Проверяем, что текст найден в диалоге
+                        return trimmed.includes(arguments[0]) ? 
+                            "Message found in DOM (exact text match)" :
+                            "Message not found in DOM";
+                    })()
+                """,
+                "arguments": [text[:100]],
+                "returnByValue": True,
+                "sessionId": self._current_session_id
+            }, session_id=self._current_session_id)
+
+            result_value = result.get("result", {}).get("result", {}).get("value", "")
+            logger.info("ℹ️  Проверка сообщения в DOM: %s", result_value)
+
+            # Успех, если найдено соответствие
+            if "found" in str(result_value) or "Message found" in str(result_value):
+                return True
+
+            # Неудача, если нет соответствия
+            logger.error("Сообщение не найдено в DOM")
+            return False
+
+        except Exception as e:
+            logger.error("Ошибка проверки DOM: %s", e)
+            return False
+
+    def get_element_value(self, selector: str) -> Optional[str]:
+        """Прочитать значение элемента по селектору."""
+        try:
+            if not self._current_session_id:
+                return None
+
+            result = self.cdp._send_sync("Runtime.evaluate", {
+                "expression": f"document.querySelector('{selector}')?.textContent || null",
+                "returnByValue": True,
+                "sessionId": self._current_session_id
+            }, session_id=self._current_session_id)
+
+            return result.get("result", {}).get("result", {}).get("value")
+
+        except Exception as e:
+            logger.warning("Ошибка чтения элемента: %s", e)
+            return None

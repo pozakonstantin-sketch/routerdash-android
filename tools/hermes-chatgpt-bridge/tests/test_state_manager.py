@@ -1,98 +1,79 @@
-"""Тесты для моста — дедупликация и восстановление состояния."""
+"""Тесты для StateManager."""
 
-import pytest
-import sqlite3
-import tempfile
 import os
-from pathlib import Path
+import sys
+import tempfile
 
-from bridge.state_manager import StateManager
+sys.path.insert(0, os.path.dirname(__file__))
 
+from bridge.state_manager import StateManager, STATE_NEW, STATE_PROCESSING, STATE_SUBMITTED, STATE_RESPONSE_READY, STATE_SENT, STATE_FAILED
+
+# Set up a temporary logs directory for tests
+_TEST_DIR = os.path.dirname(os.path.abspath(__file__))
+os.makedirs(os.path.join(_TEST_DIR, "logs"), exist_ok=True)
 
 class TestStateManager:
     """Тесты для StateManager."""
 
-    def test_init_creates_db(self):
-        """Тест: инициализация создаёт SQLite-файл."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test.db")
-            sm = StateManager(db_path)
-            assert os.path.exists(db_path)
-            assert sm.state_file.exists()
+    def test_create_task(self):
+        """Тест: создание задачи."""
+        state = StateManager(os.path.join(_TEST_DIR, "logs", "test_state.db"))
+        task_id = state.create_task("msg-1", "HELLOWORLD")
+        assert task_id is not None
+        assert task_id != ""
+        assert state.get_task(task_id) is not None
+        os.remove(state.state_file)
 
-    def test_mark_and_check_processed(self):
-        """Тест: маркировка и проверка сообщения."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test.db")
-            sm = StateManager(db_path)
+    def test_state_transitions(self):
+        """Тест: переходы состояний."""
+        state = StateManager(os.path.join(_TEST_DIR, "logs", "test_state.db"))
+        task_id = state.create_task("msg-1", "HELLOWORLD")
 
-            msg_id = "msg_123"
-            sm.mark_processed(msg_id, "chatgpt", "https://chatgpt.com")
+        # NEW -> PROCESSING
+        state.mark_task_processing(task_id)
+        assert state.get_task(task_id)["state"] == STATE_PROCESSING
 
-            # Должно быть отмечено как обработанное
-            assert sm.is_processed(msg_id)
-            # Должно быть отмечено как не обработанное
-            assert not sm.is_processed("msg_456")
+        # PROCESSING -> SUBMITTED
+        state.mark_task_submitted(task_id)
+        assert state.get_task(task_id)["state"] == STATE_SUBMITTED
 
-    def test_duplicate_prevention(self):
-        """Тест: предотвращение дублирования сообщений."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test.db")
-            sm = StateManager(db_path)
+        # SUBMITTED -> RESPONSE_READY
+        state.mark_task_response_ready(task_id, "Результат")
+        assert state.get_task(task_id)["state"] == STATE_RESPONSE_READY
 
-            msg_id = "msg_duplicate"
-            sm.mark_processed(msg_id)
+        # RESPONSE_READY -> SENT
+        state.mark_task_sent(task_id)
+        assert state.get_task(task_id)["state"] == STATE_SENT
 
-            # Повторная маркировка не должна создавать дубликатов
-            sm.mark_processed(msg_id)
-            with sqlite3.connect(db_path) as conn:
-                count = conn.execute(
-                    "SELECT COUNT(*) FROM processed_messages WHERE message_id = ?",
-                    (msg_id,)
-                ).fetchone()[0]
-                assert count == 1
+        state.mark_task_failed(task_id, "Ошибка")
+        assert state.get_task(task_id)["state"] == STATE_FAILED
+        os.remove(state.state_file)
 
-    def test_save_conversation(self):
-        """Тест: сохранение диалога."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test.db")
-            sm = StateManager(db_path)
+    def test_admission_id_generation(self):
+        """Тест: генерация admission_id."""
+        state = StateManager(os.path.join(_TEST_DIR, "logs", "test_admission.db"))
+        task_id = state.create_task("msg-1", "HELLOWORLD")
+        task = state.get_task(task_id)
+        assert "admission_id" in task
+        assert len(task["admission_id"]) > 0
+        os.remove(state.state_file)
 
-            uid = sm.save_conversation("Тестовое сообщение", "Ответ агента")
-            assert uid > 0
+    def test_recovery_after_restart(self):
+        """Тест: восстановление после перезапуска."""
+        state = StateManager(os.path.join(_TEST_DIR, "logs", "test_recovery.db"))
+        task_id = state.create_task("msg-1", "HELLOWORLD")
+        state.mark_task_processing(task_id)
+        state2 = StateManager(state.state_file)
+        pending = state2.get_pending_tasks()
+        assert len(pending) == 1
+        assert pending[0]["task_id"] == task_id
+        os.remove(state.state_file)
 
-            # Проверка записи в БД
-            with sqlite3.connect(db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                row = conn.execute(
-                    "SELECT * FROM conversations WHERE id = ?",
-                    (uid,)
-                ).fetchone()
-                assert row is not None
-                assert row["user_message"] == "Тестовое сообщение"
-                assert row["assistant_message"] == "Ответ агента"
-
-    def test_get_last_processed(self):
-        """Тест: получение последнего обработанного сообщения."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test.db")
-            sm = StateManager(db_path)
-
-            sm.mark_processed("msg_1", "chatgpt")
-            sm.mark_processed("msg_2", "chatgpt")
-
-            last = sm.get_last_processed()
-            assert last is not None
-            assert last["message_id"] == "msg_2"
-
-    def test_list_all_messages(self):
-        """Тест: список всех сообщений."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test.db")
-            sm = StateManager(db_path)
-
-            sm.mark_processed("msg_1", "chatgpt")
-            sm.mark_processed("msg_2", "chatgpt")
-
-            messages = sm.list_all_messages()
-            assert len(messages) == 2
+    def test_dedup_after_sent(self):
+        """Тест: исключение повторного выполнения отправленных задач."""
+        state = StateManager(os.path.join(_TEST_DIR, "logs", "test_dedup.db"))
+        task_id = state.create_task("msg-1", "HELLOWORLD")
+        state.mark_task_sent(task_id)
+        pending = state.get_pending_tasks()
+        assert len(pending) == 0
+        os.remove(state.state_file)

@@ -1,112 +1,129 @@
-"""Тесты для Hermes Connector (новый JSON-RPC API)."""
+"""Тесты для HermesConnector - JSON-RPC v0.23.1."""
 
-import asyncio
+import os
 import sys
-import unittest
-from unittest.mock import patch, MagicMock, AsyncMock
+import json
+import pytest
+from unittest.mock import MagicMock, patch, call
 
-# Добавляем путь к Hermes пакету для работы импортов
-sys.path.insert(0, "/Users/konstantin/.hermes/hermes-agent")
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools", "hermes-chatgpt-bridge"))
 
 from bridge.hermes_connector import HermesConnector, HermesConnectorError
 
 
-class TestHermesConnector(unittest.TestCase):
-    """Тесты Hermes Connector (новый JSON-RPC API)."""
+class TestHermesConnector:
+    """Тесты для HermesConnector."""
 
-    def setUp(self):
-        self.connector = HermesConnector(
+    def test_connect(self):
+        """Тест: подключение к Gateway."""
+        connector = HermesConnector(
             gateway_url="ws://127.0.0.1:61650/api/ws",
-            session_ticket="test_ticket"
+            session_ticket="test-ticket"
         )
+        assert connector.connect() is True
+        assert connector._connected is True
+        connector.close()
 
-    @patch("websockets.connect")
-    def test_connect_success(self, mock_connect):
-        """Тест: успешное подключение."""
-        mock_ws = AsyncMock()
-        mock_ws.close = AsyncMock()
-        async def connect_coro(*args, **kwargs):
-            return mock_ws
-        mock_connect.side_effect = connect_coro
-
-        async def run_test():
-            result = await self.connector.connect()
-            self.assertTrue(result)
-            self.assertIsNotNone(self.connector._gate)
-            self.assertIsNotNone(self.connector._ws)
-            return result
-
-        asyncio.run(run_test())
-
-    @patch("websockets.connect")
-    def test_connect_error(self, mock_connect):
-        """Тест: ошибка подключения."""
-        mock_connect.side_effect = Exception("Connection refused")
-
-        async def run_test():
-            result = await self.connector.connect()
-            self.assertFalse(result)
-            return result
-
-        asyncio.run(run_test())
-
-    @patch("websockets.connect")
-    def test_create_session(self, mock_connect):
+    def test_create_session(self):
         """Тест: создание сессии."""
-        mock_ws = AsyncMock()
-        mock_connect.return_value = mock_ws
+        connector = HermesConnector(
+            gateway_url="ws://127.0.0.1:61650/api/ws",
+            session_ticket="test-ticket"
+        )
+        assert connector.connect() is True
 
-        mock_gate = MagicMock()
-        mock_gate.request = AsyncMock(return_value={
-            "session_id": "test_session_id",
-            "handle": {"session_id": "test_session_id"}
-        })
-        self.connector._gate = mock_gate
-        self.connector._connected = True
+        with patch.object(connector, '_send_sync', return_value={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"session_id": "test-session-123"}
+        }) as mock_send:
+            session_id = connector.create_session()
+            assert session_id is not None
+            assert "test-session" in session_id
+            assert connector.session_id == "test-session-123"
+            mock_send.assert_called_once()
 
-        async def run_test():
-            result = await self.connector.create_session()
-            self.assertTrue(result)
-            self.assertEqual(self.connector._session_id, "test_session_id")
-            return result
+        connector.close()
 
-        asyncio.run(run_test())
-
-    @patch("websockets.connect")
-    def test_submit_task(self, mock_connect):
+    def test_submit_task(self):
         """Тест: отправка задачи."""
-        mock_ws = AsyncMock()
-        mock_connect.return_value = mock_ws
+        connector = HermesConnector(
+            gateway_url="ws://127.0.0.1:61650/api/ws",
+            session_ticket="test-ticket"
+        )
+        assert connector.connect() is True
 
-        mock_gate = MagicMock()
-        mock_gate.request = AsyncMock(return_value={
-            "admission_id": "test_admission",
-            "outcome": "accepted"
-        })
-        self.connector._gate = mock_gate
-        self.connector._session_id = "test_session_id"
-        self.connector._connected = True
+        # First create session
+        with patch.object(connector, '_send_sync', return_value={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"session_id": "test-session-123"}
+        }) as mock_send:
+            session_id = connector.create_session()
+            assert session_id is not None
 
-        async def run_test():
-            result = await self.connector.submit_task("test task")
-            self.assertEqual(result, "test_admission")
-            return result
+        # Then submit task
+        with patch.object(connector, '_send_sync', return_value={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {"task_id": "task-456"}
+        }) as mock_send:
+            task_id = connector.submit_task("HELLOWORLD")
+            assert task_id is not None
+            assert "task-" in task_id
+            mock_send.assert_called_once()
 
-        asyncio.run(run_test())
+        connector.close()
 
-    @patch("websockets.connect")
-    def test_close(self, mock_connect):
-        """Тест: закрытие соединения."""
-        mock_ws = AsyncMock()
-        mock_connect.return_value = mock_ws
+    def test_get_task_result(self):
+        """Тест: получение результата."""
+        connector = HermesConnector(
+            gateway_url="ws://127.0.0.1:61650/api/ws",
+            session_ticket="test-ticket"
+        )
+        assert connector.connect() is True
 
-        async def run_test():
-            await self.connector.connect()
-            await self.connector.close()
-            return True
+        # First create session
+        with patch.object(connector, '_send_sync', return_value={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"session_id": "test-session-123"}
+        }) as mock_send:
+            session_id = connector.create_session()
 
-        asyncio.run(run_test())
+        # Then get task result
+        with patch.object(connector, '_send_sync', return_value={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {"status": "completed"}
+        }) as mock_send:
+            connector.submit_task("HELLOWORLD")
+            result = connector.get_task_result("task-456", timeout=5)
+            # В локальном тесте результат может быть None, но без ошибок
+            assert result is None or isinstance(result, str)
 
+        connector.close()
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_serializable_params(self):
+        """Тест: передача сериализуемых словарей."""
+        connector = HermesConnector(
+            gateway_url="ws://127.0.0.1:61650/api/ws",
+            session_ticket="test-ticket"
+        )
+        assert connector.connect() is True
+
+        params = {
+            "type": "chat",
+            "scope": "direct",
+            "settings": {"stream": False, "tools": []}
+        }
+
+        import json
+        json.dumps(params)  # Не должно вызывать ошибки
+
+        with patch.object(connector, '_send_sync') as mock_send:
+            connector.create_session()
+            task_id = connector.submit_task("HELLOWORLD")
+            assert task_id is not None
+
+        connector.close()
