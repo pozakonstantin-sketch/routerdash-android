@@ -793,6 +793,7 @@ private fun SettingsScreen(
 }
 
 private fun loadOverviewStorage(client: RouterApi): JSONArray {
+    val failures = mutableListOf<String>()
     var mounts = runCatching { normalizeMounts(client.callArray("luci", "getMountPoints")) }
         .getOrDefault(JSONArray())
     if (mounts.length() == 0) {
