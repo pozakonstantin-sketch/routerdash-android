@@ -2205,7 +2205,7 @@ internal class SshTerminal(private val context: android.content.Context) {
             }
             override fun add(hostkey: HostKey, ui: UserInfo) = Unit
             override fun remove(host: String, type: String) = Unit
-            override fun remove(host: String, type: String, key: String) = Unit
+            override fun remove(host: String, type: String, key: ByteArray) = Unit
             override fun getHostKey(): Array<HostKey> = emptyArray()
             override fun getHostKey(host: String, type: String): Array<HostKey> = emptyArray()
             override fun getKnownHostsRepositoryID(): String = "RouterDash encrypted preferences"
