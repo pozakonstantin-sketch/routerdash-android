@@ -331,11 +331,13 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                         Screen.PACKAGES -> snapshot.copy(packages = client.call("rpc-sys", "packagelist"))
                         Screen.DOWNLOADS -> snapshot.copy(downloads = client.aria2Overview())
                         Screen.FIREWALL -> snapshot.copy(firewallRules = runCatching { client.execReadOnly("sh", listOf("-c", "echo UCI_FIREWALL; uci show firewall 2>/dev/null; echo NFT_RULESET; nft list ruleset 2>/dev/null | head -n 260")) }.getOrDefault("Не удалось прочитать правила firewall"))
-                        Screen.VPN -> snapshot.copy(vpnStatus = client.execReadOnly("sh", listOf("-c",
-                            "echo VPN_PROCESSES; ps | grep -E \"tailscale|sing-box|xray|openvpn|wireguard\" | grep -v grep; " +
-                            "echo TAILSCALE_STATUS; if command -v tailscale >/dev/null 2>&1; then tailscale status 2>&1 | head -n 30; echo TAILSCALE_IP; tailscale ip -4 2>&1; fi; echo SING_BOX_VERSION; sing-box version 2>&1 | head -n 2; " +
-                            "echo TUNNEL_INTERFACES; ip -o addr 2>/dev/null | grep -E \"tailscale|tun|wg|sing\" || true; " +
-                            "echo VPN_PROCESS_STATS; top -bn1 2>/dev/null | head -n 25; echo ROUTES; ip route 2>/dev/null | head -n 15; echo VPN_LOGS; logread 2>/dev/null | grep -iE \"tailscale|sing-box|vless|wireguard|openvpn\" | tail -n 25 || true")))
+                        Screen.VPN -> snapshot.copy(vpnStatus = runCatching {
+                            client.execReadOnly("sh", listOf("-c",
+                                "echo VPN_PROCESSES; ps | grep -E \"tailscale|sing-box|xray|openvpn|wireguard\" | grep -v grep; " +
+                                "echo TAILSCALE_STATUS; if command -v tailscale >/dev/null 2>&1; then tailscale status 2>&1 | head -n 30; echo TAILSCALE_IP; tailscale ip -4 2>&1; fi; echo SING_BOX_VERSION; sing-box version 2>&1 | head -n 2; " +
+                                "echo TUNNEL_INTERFACES; ip -o addr 2>/dev/null | grep -E \"tailscale|tun|wg|sing\" || true; " +
+                                "echo VPN_PROCESS_STATS; top -bn1 2>/dev/null | head -n 25; echo ROUTES; ip route 2>/dev/null | head -n 15; echo VPN_LOGS; logread 2>/dev/null | grep -iE \"tailscale|sing-box|vless|wireguard|openvpn\" | tail -n 25 || true"))
+                        }.getOrElse { friendlyRouterError(it, "Состояние VPN недоступно") })
                         Screen.SERVICES -> snapshot.copy(
                             services = client.call("rc", "list"),
                             processes = runCatching { client.execReadOnly("top", listOf("-bn1")) }.getOrDefault("") +
