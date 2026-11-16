@@ -8,6 +8,7 @@ import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.horizontalScroll
@@ -23,6 +24,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
@@ -528,7 +532,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                                 NavigationRailItem(
                                     selected = selected == screen,
                                     onClick = { selected = screen; refresh(screen) },
-                                    icon = { Icon(icon, contentDescription = screen.title) },
+                                    icon = { SectionNavigationIcon(icon, selected == screen, screen.title) },
                                     label = { Text(screen.title, maxLines = 1) },
                                     alwaysShowLabel = false
                                 )
@@ -631,7 +635,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                                         NavigationDrawerItem(
                                             label = { Text(screen.title) }, selected = selected == screen,
                                             onClick = { showNavigationSheet = false; selected = screen; refresh(screen) },
-                                            icon = { Icon(icon, contentDescription = null) },
+                                            icon = { SectionNavigationIcon(icon, selected == screen, null) },
                                             modifier = Modifier.padding(vertical = 3.dp),
                                             shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp)
                                         )
@@ -644,6 +648,38 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                 }
             }
         }
+    }
+}
+
+
+@Composable
+private fun SectionNavigationIcon(
+    icon: ImageVector,
+    selected: Boolean,
+    description: String?
+) {
+    val cyan = Color(0xFF00DDF2)
+    val blue = Color(0xFF168BFF)
+    Box(Modifier.size(38.dp), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier.size(34.dp).border(
+                width = if (selected) 2.dp else 1.4.dp,
+                brush = Brush.linearGradient(listOf(cyan, blue)),
+                shape = CircleShape
+            ),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = description,
+                tint = if (selected) cyan else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(19.dp)
+            )
+        }
+        Box(
+            Modifier.align(Alignment.TopEnd).padding(top = 1.dp, end = 1.dp)
+                .size(7.dp).background(Color(0xFF55EF45), CircleShape)
+        )
     }
 }
 
