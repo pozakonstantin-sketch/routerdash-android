@@ -1,6 +1,8 @@
 package ru.routerdash.android
 
 import android.os.Bundle
+import android.content.Intent
+import android.net.Uri
 import androidx.fragment.app.FragmentActivity
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
@@ -44,6 +46,9 @@ import org.json.JSONObject
 import java.net.URI
 import java.util.concurrent.TimeUnit
 import com.jcraft.jsch.JSch
+import com.jcraft.jsch.HostKey
+import com.jcraft.jsch.HostKeyRepository
+import com.jcraft.jsch.UserInfo
 import com.jcraft.jsch.ChannelShell
 import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.ChannelExec
@@ -53,10 +58,43 @@ import java.io.ByteArrayOutputStream
 import java.io.OutputStream
 
 class MainActivity : FragmentActivity() {
+    private var syncFolderCallback: ((Uri?) -> Unit)? = null
+
+    fun launchSyncFolderPicker(callback: (Uri?) -> Unit) {
+        check(syncFolderCallback == null) { "Выбор папки уже открыт." }
+        syncFolderCallback = callback
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        try {
+            startActivityForResult(intent, REQUEST_CODE_SYNC_FOLDER)
+        } catch (error: Exception) {
+            syncFolderCallback = null
+            throw error
+        }
+    }
+
+    @Deprecated("Deprecated in Android API; required for the fixed request-code path")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_CODE_SYNC_FOLDER) {
+            val callback = syncFolderCallback
+            syncFolderCallback = null
+            callback?.invoke(if (resultCode == RESULT_OK) data?.data else null)
+        }
+    }
+
     private val securityPrefs by lazy { getSharedPreferences("routerdash_security", MODE_PRIVATE) }
     private val biometricUnlockSignal = androidx.compose.runtime.mutableIntStateOf(0)
     private var shouldAuthenticate = true
     private var promptVisible = false
+
+    companion object {
+        // FragmentActivity reserves the upper 16 bits for fragment routing.
+        private const val REQUEST_CODE_SYNC_FOLDER = 0x5244
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -199,13 +237,13 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                             cpuRaw = runCatching { readUbusFile(client, "/proc/stat") }.getOrNull()?.takeIf { it.contains("cpu ") }
                                 ?: runCatching { client.execReadOnly("cat", listOf("/proc/stat")) }.getOrNull(),
                             networkDevices = client.call("luci-rpc", "getNetworkDevices"),
-                            storage = runCatching { parseDfOutput(client.execReadOnly("df", listOf("-kP"))) }.getOrNull(),
+                            storage = runCatching { loadOverviewStorage(client) }.getOrNull(),
                             vpnStatus = runCatching {
                                 client.execReadOnly("sh", listOf("-c",
                                     "echo VPN_PROCESSES; ps | grep -E \"tailscale|sing-box|xray|openvpn|wireguard\" | grep -v grep; " +
                                     "echo TAILSCALE_STATUS; if command -v tailscale >/dev/null 2>&1; then tailscale status 2>&1 | head -n 10; echo TAILSCALE_IP; tailscale ip -4 2>&1; fi; echo SING_BOX_VERSION; sing-box version 2>&1 | head -n 2; " +
                                     "echo TUNNEL_INTERFACES; ip -o addr 2>/dev/null | grep -E \"tailscale|tun|wg|sing\" || true; echo VPN_PROCESS_STATS; top -bn1 2>/dev/null | head -n 25"))
-                            }.getOrDefault("Не удалось получить состояние VPN")
+                            }.getOrElse { friendlyRouterError(it, "Состояние VPN недоступно") }
                         )
                         Screen.NETWORK -> {
                             val ifaceDump = client.call("network.interface", "dump")
@@ -752,6 +790,49 @@ private fun SettingsScreen(
     }
 }
 
+private fun loadOverviewStorage(client: RouterApi): JSONArray {
+    val failures = mutableListOf<String>()
+    var mounts = runCatching { normalizeMounts(client.callArray("luci", "getMountPoints")) }
+        .onFailure { failures += it.message.orEmpty() }.getOrDefault(JSONArray())
+    if (mounts.length() == 0) {
+        mounts = runCatching {
+            normalizeMounts(findArrayDeep(client.call("luci", "getMountPoints"),
+                listOf("mounts", "mount_points", "mountpoints", "results", "entries", "data")))
+        }.onFailure { failures += it.message.orEmpty() }.getOrDefault(JSONArray())
+    }
+    if (mounts.length() == 0) {
+        mounts = runCatching { parseDfOutput(client.execReadOnly("df", listOf("-kP"))) }
+            .onFailure { failures += it.message.orEmpty() }.getOrDefault(JSONArray())
+    }
+    if (mounts.length() == 0) {
+        mounts = runCatching { parseDfOutput(client.execReadOnly("df", listOf("-k"))) }
+            .onFailure { failures += it.message.orEmpty() }.getOrDefault(JSONArray())
+    }
+    if (mounts.length() == 0) {
+        mounts = runCatching { parseProcMounts(readUbusFile(client, "/proc/mounts").orEmpty()) }
+            .onFailure { failures += it.message.orEmpty() }.getOrDefault(JSONArray())
+    }
+    runCatching {
+        val info = client.call("system", "info")
+        listOf("root" to "/", "tmp" to "/tmp").forEach { (key, mountPath) ->
+            val fs = info.optJSONObject(key) ?: return@forEach
+            val totalKb = fs.optLong("total")
+            val usedKb = fs.optLong("used", -1L)
+            val freeKb = fs.optLong("free", -1L)
+            if (totalKb > 0L && (0 until mounts.length()).none {
+                    mounts.optJSONObject(it)?.optString("mount") == mountPath
+                }) {
+                val usedBytes = if (usedKb >= 0L) usedKb * 1024L
+                    else (totalKb - freeKb.coerceAtLeast(0L)) * 1024L
+                mounts.put(JSONObject().put("device", if (key == "root") "rootfs" else "tmpfs")
+                    .put("mount", mountPath).put("size", totalKb * 1024L)
+                    .put("used", usedBytes).put("avail", (totalKb * 1024L - usedBytes).coerceAtLeast(0L)))
+            }
+        }
+    }
+    return mounts
+}
+
 @Composable
 private fun OverviewScreen(s: Snapshot) {
     val board = s.board
@@ -763,7 +844,7 @@ private fun OverviewScreen(s: Snapshot) {
     val used = (total - available).coerceAtLeast(0L)
     val ramPercent = if (total > 0L) (used.toFloat() / total).coerceIn(0f, 1f) else 0f
     val uptime = info?.optLong("uptime")?.let { duration(it) } ?: "—"
-    val load = info?.optJSONArray("load")?.optLong(0)?.let { String.format("%.2f", it / 1000.0) } ?: "—"
+    val load = info?.optJSONArray("load")?.optLong(0)?.let { formatLoadAverage(it) } ?: "—"
     val hostname = board?.optString("hostname", "OpenWrt")?.ifBlank { "OpenWrt" } ?: "OpenWrt"
     val model = board?.optString("model", "Маршрутизатор")?.ifBlank { "Маршрутизатор" } ?: "Маршрутизатор"
     val cpu = s.cpuPercent
@@ -1166,7 +1247,7 @@ private fun DevicesScreen(result: JSONObject?, wireless: JSONObject?) {
             val mac = item.optString("macaddr").uppercase()
             val ip = item.optString("ipaddr")
             val key = mac.ifBlank { ip }
-            if (key.isNotBlank()) merged[key] = Device(ip, mac, item.optString("hostname", "Без имени"), "DHCP", item.optString("expires", "—"))
+            if (key.isNotBlank()) merged[key] = Device(ip, mac, item.optString("hostname", "Без имени"), "DHCP", formatLeaseExpiry(item.optString("expires", "—")))
         }
         if (arp != null) for (i in 0 until arp.length()) {
             val item = arp.optJSONObject(i) ?: continue
@@ -1402,14 +1483,20 @@ private fun parseLogReadOutput(output: String): JSONObject {
     return JSONObject().put("log", entries)
 }
 
-private fun parseLogLine(line: String): JSONObject {
-    val priority = when {
-        line.contains(" error", true) || line.contains(" failed", true) || line.contains(" denied", true) -> "error"
-        line.contains(" warn", true) -> "warning"
+internal fun parseLogPriority(line: String): String {
+    val normalized = line.lowercase()
+    return when {
+        Regex("""(?:^|[.\\s])(?:emerg|alert|crit|critical|err|error|failed|denied)(?:$|[.\\s:])""")
+            .containsMatchIn(normalized) -> "error"
+        Regex("""(?:^|[.\\s])(?:warn|warning)(?:$|[.\\s:])""")
+            .containsMatchIn(normalized) -> "warning"
         else -> "info"
     }
+}
+
+private fun parseLogLine(line: String): JSONObject {
     val timestamp = Regex("^(\\w{3}\\s+\\d+\\s+[\\d:]+)").find(line)?.value.orEmpty()
-    return JSONObject().put("msg", line).put("time", timestamp).put("priority", priority)
+    return JSONObject().put("msg", line).put("time", timestamp).put("priority", parseLogPriority(line))
 }
 
 private fun serviceDescription(name: String): String {
@@ -2094,24 +2181,54 @@ internal class SshTerminal(private val context: android.content.Context) {
 
     fun connect(host: String, port: Int, username: String, password: String) {
         val jsch = JSch()
+        val hostKeyPrefs = context.getSharedPreferences("routerdash_ssh_hosts", 0)
+        val hostKeyId = "$host:$port"
+        val knownFingerprint = hostKeyPrefs.getString(hostKeyId, null)
+        var changedHostKey = false
+        // JSch calls HostKeyRepository.check during key exchange, before password authentication.
+        // First connection uses trust-on-first-use; subsequent key changes are rejected pre-auth.
+        jsch.hostKeyRepository = object : HostKeyRepository {
+            override fun check(hostname: String, key: ByteArray): Int {
+                val presented = HostKey(hostname, key).getFingerPrint(jsch)
+                return when {
+                    knownFingerprint == null -> {
+                        if (!hostKeyPrefs.edit().putString(hostKeyId, presented).commit()) {
+                            throw SecurityException("Не удалось сохранить SSH host key для $host:$port.")
+                        }
+                        HostKeyRepository.OK
+                    }
+                    knownFingerprint == presented -> HostKeyRepository.OK
+                    else -> {
+                        changedHostKey = true
+                        HostKeyRepository.CHANGED
+                    }
+                }
+            }
+            override fun add(hostkey: HostKey, ui: UserInfo) = Unit
+            override fun remove(host: String, type: String) = Unit
+            override fun remove(host: String, type: String, key: String) = Unit
+            override fun getHostKey(): Array<HostKey> = emptyArray()
+            override fun getHostKey(host: String, type: String): Array<HostKey> = emptyArray()
+            override fun getKnownHostsRepositoryID(): String = "RouterDash encrypted preferences"
+        }
         val ssh = jsch.getSession(username, host, port)
         ssh.setPassword(password)
         val config = java.util.Properties().apply {
-            put("StrictHostKeyChecking", "no")
+            put("StrictHostKeyChecking", "yes")
             put("PreferredAuthentications", "password,keyboard-interactive")
         }
         ssh.setConfig(config)
         ssh.timeout = 10000
-        ssh.connect(10000)
-        val hostKeyFingerprint = ssh.hostKey.getFingerPrint(jsch)
-        val hostKeyPrefs = context.getSharedPreferences("routerdash_ssh_hosts", 0)
-        val hostKeyId = "$host:$port"
-        val knownFingerprint = hostKeyPrefs.getString(hostKeyId, null)
-        if (knownFingerprint != null && knownFingerprint != hostKeyFingerprint) {
+        try {
+            ssh.connect(10000)
+        } catch (error: Exception) {
             ssh.disconnect()
-            throw SecurityException("SSH host key изменился для $host:$port. Проверь роутер перед повторным подключением.")
+            if (changedHostKey) {
+                throw SecurityException("SSH host key изменился для $host:$port. Пароль не отправлялся; проверь роутер.", error)
+            }
+            throw error
         }
-        if (knownFingerprint == null) hostKeyPrefs.edit().putString(hostKeyId, hostKeyFingerprint).apply()
+        val hostKeyFingerprint = ssh.hostKey.getFingerPrint(jsch)
         fingerprint = hostKeyFingerprint
         val shell = ssh.openChannel("shell") as ChannelShell
         shell.setPtyType("xterm", 100, 30, 1000, 700)
@@ -2436,10 +2553,28 @@ internal fun formatBytes(bytes: Long): String {
 }
 
 private fun duration(seconds: Long): String {
-    val days = seconds / 86400
-    val hours = (seconds % 86400) / 3600
-    val minutes = (seconds % 3600) / 60
+    val safeSeconds = seconds.coerceAtLeast(0L)
+    val days = safeSeconds / 86400
+    val hours = (safeSeconds % 86400) / 3600
+    val minutes = (safeSeconds % 3600) / 60
     return if (days > 0) days.toString() + "д " + hours + "ч" else hours.toString() + "ч " + minutes + "м"
+}
+
+internal fun formatLoadAverage(rawFixedPoint: Long): String =
+    String.format(java.util.Locale.US, "%.2f", rawFixedPoint / 65536.0)
+
+internal fun formatLeaseExpiry(raw: String): String {
+    val value = raw.trim()
+    val seconds = value.toLongOrNull() ?: return value.ifBlank { "—" }
+    return if (seconds <= 0L) "Истекла" else duration(seconds)
+}
+
+private fun friendlyRouterError(error: Throwable, fallback: String): String {
+    val detail = error.message.orEmpty()
+    return if (Regex("""(?:ubus|rpc).*?(?:код|code)\\s*6|(?:код|code)\\s*6""", RegexOption.IGNORE_CASE)
+            .containsMatchIn(detail)) {
+        "Роутер запретил этот запрос (ACL rpcd). Нужны права ubus для соответствующей службы."
+    } else if (detail.isBlank()) fallback else "$fallback: $detail"
 }
 
 
