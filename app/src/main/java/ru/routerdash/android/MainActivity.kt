@@ -791,14 +791,13 @@ private fun SettingsScreen(
 }
 
 private fun loadOverviewStorage(client: RouterApi): JSONArray {
-    val failures = mutableListOf<String>()
     var mounts = runCatching { normalizeMounts(client.callArray("luci", "getMountPoints")) }
-        .onFailure { failures += it.message.orEmpty() }.getOrDefault(JSONArray())
+        .getOrDefault(JSONArray())
     if (mounts.length() == 0) {
         mounts = runCatching {
             normalizeMounts(findArrayDeep(client.call("luci", "getMountPoints"),
                 listOf("mounts", "mount_points", "mountpoints", "results", "entries", "data")))
-        }.onFailure { failures += it.message.orEmpty() }.getOrDefault(JSONArray())
+        }.getOrDefault(JSONArray())
     }
     if (mounts.length() == 0) {
         mounts = runCatching { parseDfOutput(client.execReadOnly("df", listOf("-kP"))) }
@@ -1486,9 +1485,9 @@ private fun parseLogReadOutput(output: String): JSONObject {
 internal fun parseLogPriority(line: String): String {
     val normalized = line.lowercase()
     return when {
-        Regex("""(?:^|[.\\s])(?:emerg|alert|crit|critical|err|error|failed|denied)(?:$|[.\\s:])""")
+        Regex("""(?:^|[.\s])(?:emerg|alert|crit|critical|err|error|failed|denied)(?:$|[.\\s:])""")
             .containsMatchIn(normalized) -> "error"
-        Regex("""(?:^|[.\\s])(?:warn|warning)(?:$|[.\\s:])""")
+        Regex("""(?:^|[.\s])(?:warn|warning)(?:$|[.\\s:])""")
             .containsMatchIn(normalized) -> "warning"
         else -> "info"
     }
@@ -2571,7 +2570,7 @@ internal fun formatLeaseExpiry(raw: String): String {
 
 private fun friendlyRouterError(error: Throwable, fallback: String): String {
     val detail = error.message.orEmpty()
-    return if (Regex("""(?:ubus|rpc).*?(?:код|code)\\s*6|(?:код|code)\\s*6""", RegexOption.IGNORE_CASE)
+    return if (Regex("""(?:ubus|rpc).*?(?:код|code)\s*6|(?:код|code)\s*6""", RegexOption.IGNORE_CASE)
             .containsMatchIn(detail)) {
         "Роутер запретил этот запрос (ACL rpcd). Нужны права ubus для соответствующей службы."
     } else if (detail.isBlank()) fallback else "$fallback: $detail"
