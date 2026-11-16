@@ -2,8 +2,6 @@ package ru.routerdash.android
 
 import android.content.Context
 import android.net.Uri
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -167,6 +165,7 @@ internal object SftpFileSync {
 @Composable
 internal fun SyncScreen(sshConnected: Boolean, ssh: SshTerminal?, sshHostDefault: String, sshUserDefault: String, onOpenSsh: () -> Unit) {
     val context = LocalContext.current
+    val activity = context as? MainActivity
     val prefs = remember { context.getSharedPreferences("routerdash_sync", 0) }
     val scope = rememberCoroutineScope()
     var treeUriText by rememberSaveable { mutableStateOf(prefs.getString("tree_uri", "") ?: "") }
@@ -190,16 +189,6 @@ internal fun SyncScreen(sshConnected: Boolean, ssh: SshTerminal?, sshHostDefault
     var autoStatus by remember { mutableStateOf(prefs.getString("auto_last_status", "Пока запусков не было.") ?: "Пока запусков не было.") }
     var autoError by remember { mutableStateOf<String?>(null) }
     val plan = remember { mutableStateListOf<SyncPlanItem>() }
-
-    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) {
-            runCatching { context.contentResolver.takePersistableUriPermission(uri,
-                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
-            treeUriText = uri.toString()
-            prefs.edit().putString("tree_uri", treeUriText).apply()
-            plan.clear(); errorText = null
-        }
-    }
 
     fun scanFiles() {
         val active = ssh
@@ -266,7 +255,25 @@ internal fun SyncScreen(sshConnected: Boolean, ssh: SshTerminal?, sshHostDefault
         item {
             InfoCard("Папки синхронизации") {
                 Text("Телефон · $folderName", fontWeight = FontWeight.SemiBold)
-                OutlinedButton(onClick = { folderPicker.launch(null) }, modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(onClick = {
+                    if (activity == null) {
+                        errorText = "Не удалось открыть системный выбор папки."
+                    } else {
+                        runCatching {
+                            activity.launchSyncFolderPicker { uri ->
+                                if (uri != null) {
+                                    runCatching { context.contentResolver.takePersistableUriPermission(uri,
+                                        android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                            android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
+                                    treeUriText = uri.toString()
+                                    prefs.edit().putString("tree_uri", treeUriText).apply()
+                                    plan.clear()
+                                    errorText = null
+                                }
+                            }
+                        }.onFailure { errorText = it.message ?: "Не удалось открыть выбор папки." }
+                    }
+                }, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Outlined.Folder, null); Spacer(Modifier.width(8.dp)); Text("Выбрать папку телефона")
                 }
                 OutlinedTextField(remoteRoot, { remoteRoot = it }, Modifier.fillMaxWidth(),
