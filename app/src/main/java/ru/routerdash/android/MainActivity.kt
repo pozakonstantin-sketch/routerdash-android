@@ -1485,9 +1485,9 @@ private fun parseLogReadOutput(output: String): JSONObject {
 internal fun parseLogPriority(line: String): String {
     val normalized = line.lowercase()
     return when {
-        Regex("""(?:^|[.\s])(?:emerg|alert|crit|critical|err|error|failed|denied)(?:$|[.\\s:])""")
+        Regex("""(?:^|[.\s])(?:emerg|alert|crit|critical|err|error|failed|denied)(?:$|[.\s:])""")
             .containsMatchIn(normalized) -> "error"
-        Regex("""(?:^|[.\s])(?:warn|warning)(?:$|[.\\s:])""")
+        Regex("""(?:^|[.\s])(?:warn|warning)(?:$|[.\s:])""")
             .containsMatchIn(normalized) -> "warning"
         else -> "info"
     }
