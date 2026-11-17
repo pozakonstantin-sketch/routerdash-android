@@ -231,7 +231,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
     var sshError by remember { mutableStateOf<String?>(null) }
     var sshOutput by remember { mutableStateOf("RouterDash SSH · готов к подключению\n") }
 
-    fun connectSsh(host: String, port: Int, user: String, enteredPassword: String? = null) {
+    fun connectSsh(host: String, port: Int, user: String, enteredPassword: String? = null, navigateToSsh: Boolean = true) {
         if (sshConnecting) return
         val savedPassword = runCatching { encryptedCredentials(context).getString("password", null) }.getOrNull()
         val resolvedPassword = enteredPassword?.takeIf { it.isNotBlank() } ?: savedPassword
@@ -251,7 +251,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                 sshSession = terminal
                 sshConnected = true
                 sshOutput += "\n[SSH] Соединение установлено: $user@$host:$port\n[SSH] Host key: ${terminal.fingerprint}\n"
-                selected = Screen.SSH
+                if (navigateToSsh) selected = Screen.SSH
             } catch (e: Exception) {
                 sshError = when {
                     e is SecurityException -> e.message ?: "Проверка SSH host key не пройдена."
@@ -635,7 +635,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                             sshUserDefault = username,
                             sshConnecting = sshConnecting,
                             sshError = sshError,
-                            onConnectSsh = { connectSsh(runCatching { URI(url).host ?: "192.168.1.1" }.getOrDefault("192.168.1.1"), 22, username) },
+                            onConnectSsh = { connectSsh(runCatching { URI(url).host ?: "192.168.1.1" }.getOrDefault("192.168.1.1"), 22, username, navigateToSsh = false) },
                             onOpenSsh = { selected = Screen.SSH }
                         )
                         Screen.SSH -> SshScreen(
