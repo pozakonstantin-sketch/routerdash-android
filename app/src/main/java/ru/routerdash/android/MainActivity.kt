@@ -501,8 +501,8 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
 
     LaunchedEffect(connected, selected, refreshIntervalSeconds, autoRefreshPaused) {
         while (connected && !autoRefreshPaused) {
-            refresh(selected)
             delay(refreshIntervalSeconds * 1000L)
+            if (connected && !autoRefreshPaused) refresh(selected)
         }
     }
 
@@ -544,9 +544,13 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                                 Icon(Icons.Outlined.Settings, contentDescription = "Настройки приложения")
                             }
                             if (loading) CircularProgressIndicator(Modifier.size(20.dp))
-                            IconButton(onClick = { autoRefreshPaused = !autoRefreshPaused }) {
-                                Icon(if (autoRefreshPaused) Icons.Outlined.PlayArrow else Icons.Outlined.Pause,
-                                    contentDescription = if (autoRefreshPaused) "Возобновить автообновление" else "Поставить автообновление на паузу")
+                            IconButton(onClick = {
+                                autoRefreshPaused = !autoRefreshPaused
+                                refresh()
+                            }) {
+                                Icon(Icons.Outlined.Refresh, contentDescription = if (autoRefreshPaused)
+                                    "Обновить сейчас и возобновить автообновление"
+                                else "Обновить сейчас и поставить автообновление на паузу")
                             }
                             IconButton(onClick = { scope.launch { withContext(Dispatchers.IO) { sshSession?.close() }; sshSession = null; sshConnected = false }; connected = false; api = null; selected = Screen.OVERVIEW }) {
                                 Icon(Icons.Outlined.Logout, contentDescription = "Отключиться")
@@ -1539,11 +1543,7 @@ private fun StorageScreen(mounts: JSONArray?, loadError: String?, diskDetails: S
     }
     LazyColumn(contentPadding = PaddingValues(vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Хранилища роутера", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, contentDescription = "Обновить") }
-            }
+            Text("Хранилища роутера", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Text("Использование файловых систем, разделов и подключённых накопителей.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -1557,7 +1557,6 @@ private fun StorageScreen(mounts: JSONArray?, loadError: String?, diskDetails: S
         if (!loadError.isNullOrBlank()) item {
             InfoCard("Диагностика получения данных") {
                 Text(loadError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                OutlinedButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, null); Spacer(Modifier.width(6.dp)); Text("Повторить") }
             }
         }
         if (mounts == null) item { EmptyState("Нет данных о файловых системах.") }
@@ -1838,10 +1837,7 @@ private fun PackagesScreen(result: JSONObject?, onRefresh: () -> Unit) {
     }
     LazyColumn(contentPadding = PaddingValues(vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
         item {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("Установленные пакеты", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, contentDescription = "Обновить") }
-            }
+            Text("Установленные пакеты", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Text("${filtered.size} из ${packages.size} пакетов · нажми на пакет, чтобы раскрыть описание",
                 color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
             OutlinedTextField(filter, { filter = it }, Modifier.fillMaxWidth(),
@@ -1889,10 +1885,7 @@ private fun DownloadsScreen(result: JSONObject?, api: RouterApi?, onRefresh: () 
     }
     LazyColumn(contentPadding = PaddingValues(vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("Загрузки aria2", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, contentDescription = "Обновить") }
-            }
+            Text("Загрузки aria2", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             if (global != null) {
                 InfoCard("Состояние загрузчика") {
                     InfoLine("Загружается", formatRate(global.optString("downloadSpeed").toLongOrNull() ?: 0L))
@@ -1992,13 +1985,7 @@ private fun ServicesScreen(result: JSONObject?, processes: String?, api: RouterA
 
     LazyColumn(contentPadding = PaddingValues(vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Службы OpenWrt", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                IconButton(onClick = onRefresh, enabled = busyService == null) {
-                    Icon(Icons.Outlined.Refresh, contentDescription = "Обновить список")
-                }
-            }
+            Text("Службы OpenWrt", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             if (message != null) Text(message!!, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 6.dp))
         }
@@ -2112,10 +2099,7 @@ private fun VpnScreen(status: String?, onRefresh: () -> Unit) {
     val tailscaleLoggedOut = tailscale.contains("Logged out", true) || tailscale.contains("NeedsLogin", true)
     LazyColumn(contentPadding = PaddingValues(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("VPN и туннели", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, null) }
-            }
+            Text("VPN и туннели", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Text("Состояние Tailscale, sing-box / VLESS, туннельных интерфейсов, маршрутов и системных логов.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
