@@ -62,7 +62,7 @@ import java.io.OutputStream
 
 @Composable
 private fun RouterDashIcon(index: Int, description: String?, modifier: Modifier = Modifier.size(40.dp)) {
-    val atlas = remember { ImageBitmap.imageResource(R.drawable.routerdash_icons_atlas) }
+    val atlas = ImageBitmap.imageResource(R.drawable.routerdash_icons_atlas)
     val cellSize = atlas.width / 4
     Canvas(modifier.semantics { contentDescription = description.orEmpty() }) {
         drawImage(
