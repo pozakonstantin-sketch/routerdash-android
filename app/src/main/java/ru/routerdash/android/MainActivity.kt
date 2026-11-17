@@ -221,6 +221,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
     var sshSession by remember { mutableStateOf<SshTerminal?>(null) }
     var sshConnected by remember { mutableStateOf(false) }
     var sshConnecting by remember { mutableStateOf(false) }
+    var sshError by remember { mutableStateOf<String?>(null) }
     var sshOutput by remember { mutableStateOf("RouterDash SSH · готов к подключению\n") }
 
     fun refresh(screen: Screen = selected) {
@@ -238,12 +239,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                                 ?: runCatching { client.execReadOnly("cat", listOf("/proc/stat")) }.getOrNull(),
                             networkDevices = client.call("luci-rpc", "getNetworkDevices"),
                             storage = runCatching { loadOverviewStorage(client) }.getOrNull(),
-                            vpnStatus = runCatching {
-                                client.execReadOnly("sh", listOf("-c",
-                                    "echo VPN_PROCESSES; ps | grep -E \"tailscale|sing-box|xray|openvpn|wireguard\" | grep -v grep; " +
-                                    "echo TAILSCALE_STATUS; if command -v tailscale >/dev/null 2>&1; then tailscale status 2>&1 | head -n 10; echo TAILSCALE_IP; tailscale ip -4 2>&1; fi; echo SING_BOX_VERSION; sing-box version 2>&1 | head -n 2; " +
-                                    "echo TUNNEL_INTERFACES; ip -o addr 2>/dev/null | grep -E \"tailscale|tun|wg|sing\" || true; echo VPN_PROCESS_STATS; top -bn1 2>/dev/null | head -n 25"))
-                            }.getOrElse { friendlyRouterError(it, "Состояние VPN недоступно") }
+                            vpnStatus = collectVpnStatus(client)
                         )
                         Screen.NETWORK -> {
                             val ifaceDump = client.call("network.interface", "dump")
@@ -331,13 +327,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                         Screen.PACKAGES -> snapshot.copy(packages = client.call("rpc-sys", "packagelist"))
                         Screen.DOWNLOADS -> snapshot.copy(downloads = client.aria2Overview())
                         Screen.FIREWALL -> snapshot.copy(firewallRules = runCatching { client.execReadOnly("sh", listOf("-c", "echo UCI_FIREWALL; uci show firewall 2>/dev/null; echo NFT_RULESET; nft list ruleset 2>/dev/null | head -n 260")) }.getOrDefault("Не удалось прочитать правила firewall"))
-                        Screen.VPN -> snapshot.copy(vpnStatus = runCatching {
-                            client.execReadOnly("sh", listOf("-c",
-                                "echo VPN_PROCESSES; ps | grep -E \"tailscale|sing-box|xray|openvpn|wireguard\" | grep -v grep; " +
-                                "echo TAILSCALE_STATUS; if command -v tailscale >/dev/null 2>&1; then tailscale status 2>&1 | head -n 30; echo TAILSCALE_IP; tailscale ip -4 2>&1; fi; echo SING_BOX_VERSION; sing-box version 2>&1 | head -n 2; " +
-                                "echo TUNNEL_INTERFACES; ip -o addr 2>/dev/null | grep -E \"tailscale|tun|wg|sing\" || true; " +
-                                "echo VPN_PROCESS_STATS; top -bn1 2>/dev/null | head -n 25; echo ROUTES; ip route 2>/dev/null | head -n 15; echo VPN_LOGS; logread 2>/dev/null | grep -iE \"tailscale|sing-box|vless|wireguard|openvpn\" | tail -n 25 || true"))
-                        }.getOrElse { friendlyRouterError(it, "Состояние VPN недоступно") })
+                        Screen.VPN -> snapshot.copy(vpnStatus = collectVpnStatus(client))
                         Screen.SERVICES -> snapshot.copy(
                             services = client.call("rc", "list"),
                             processes = runCatching { client.execReadOnly("top", listOf("-bn1")) }.getOrDefault("") +
@@ -543,6 +533,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                 Row(Modifier.fillMaxSize().padding(padding)) {
                     if (isExpandedLayout) {
                         NavigationRail(
+                            modifier = Modifier.fillMaxHeight().verticalScroll(rememberScrollState()),
                             containerColor = MaterialTheme.colorScheme.surface,
                             header = {
                                 Icon(Icons.Outlined.Router, contentDescription = "RouterDash",
@@ -603,16 +594,24 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                         )
                         Screen.SSH -> SshScreen(
                             host = runCatching { URI(url).host ?: "192.168.1.1" }.getOrDefault("192.168.1.1"),
-                            defaultUser = username, connected = sshConnected, connecting = sshConnecting, output = sshOutput,
+                            defaultUser = username, connected = sshConnected, connecting = sshConnecting, output = sshOutput, error = sshError,
                             onConnect = { host, port, user, pass ->
                                 scope.launch {
                                     sshConnecting = true
+                                    sshError = null
                                     try {
                                         val terminal = withContext(Dispatchers.IO) { SshTerminal(context).also { it.connect(host, port, user, pass) } }
                                         sshSession = terminal; sshConnected = true
                                         sshOutput += "\n[SSH] Соединение установлено: $user@$host:$port\n[SSH] Host key: ${terminal.fingerprint}\n"
-                                    } catch (e: Exception) { sshOutput += "\n[SSH ERROR] ${e.message}\n" }
-                                    finally { sshConnecting = false }
+                                    } catch (e: Exception) {
+                                        sshError = when {
+                                            e is SecurityException -> e.message ?: "Проверка SSH host key не пройдена."
+                                            e.message?.contains("Auth fail", true) == true -> "Неверный SSH-пароль или сервер отклонил выбранный способ авторизации."
+                                            e.message?.contains("timeout", true) == true -> "Истекло время ожидания SSH. Проверь адрес, порт и доступность роутера."
+                                            else -> e.message ?: "Не удалось подключиться по SSH."
+                                        }
+                                        sshOutput += "\n[SSH ERROR] $sshError\n"
+                                    } finally { sshConnecting = false }
                                 }
                             },
                             onSend = { command -> scope.launch {
@@ -792,6 +791,67 @@ private fun SettingsScreen(
     }
 }
 
+private fun collectVpnStatus(client: RouterApi): String {
+    val failures = mutableListOf<String>()
+    val services = runCatching { client.call("rc", "list") }
+        .onFailure { failures += "rc.list: ${friendlyRouterError(it, "службы недоступны")}" }
+        .getOrNull()
+    val interfaces = runCatching { client.call("network.interface", "dump") }
+        .onFailure { failures += "network.interface.dump: ${friendlyRouterError(it, "интерфейсы недоступны")}" }
+        .getOrNull()
+    val packageList = runCatching { client.call("rpc-sys", "packagelist") }
+        .onFailure { failures += "rpc-sys.packagelist: ${friendlyRouterError(it, "список пакетов недоступен")}" }
+        .getOrNull()
+
+    val keywords = listOf("tailscale", "tachyon", "sing-box", "singbox", "podkop", "xray", "openvpn", "wireguard", "wg-quick")
+    val serviceRows = mutableListOf<String>()
+    services?.keys()?.asSequence()?.toList()?.sorted()?.forEach { name ->
+        if (keywords.any { name.contains(it, ignoreCase = true) }) {
+            val service = services.optJSONObject(name) ?: JSONObject()
+            val state = if (!service.has("running")) "состояние неизвестно"
+                else if (service.optBoolean("running")) "работает" else "остановлена"
+            val enabled = if (service.has("enabled")) {
+                if (service.optBoolean("enabled")) ", автозапуск включён" else ", автозапуск выключен"
+            } else ""
+            serviceRows += "$name — $state$enabled"
+        }
+    }
+    val packageText = packageList?.toString().orEmpty()
+    val installed = keywords.filter { packageText.contains(it, ignoreCase = true) }
+        .distinct().joinToString(", ")
+    val interfaceText = interfaces?.toString().orEmpty()
+    val tunnelHints = Regex("""tailscale0|tun[0-9A-Za-z_.-]*|wg[0-9A-Za-z_.-]*|zt[0-9A-Za-z_.-]*""",
+        RegexOption.IGNORE_CASE).findAll(interfaceText).map { it.value }.distinct().toList()
+
+    val tailscaleService = serviceRows.firstOrNull { it.contains("tailscale", true) }
+    val singBoxService = serviceRows.firstOrNull { it.contains("sing-box", true) || it.contains("singbox", true) }
+    val tachyonServices = serviceRows.filter { it.contains("tachyon", true) || it.contains("podkop", true) }
+    val vpnServices = (serviceRows + if (installed.isNotBlank()) listOf("Пакеты обнаружены: $installed") else emptyList())
+        .distinct().joinToString("\n").ifBlank { "Службы VPN не обнаружены через rc.list." }
+
+    return buildString {
+        appendLine("VPN_PROCESSES")
+        appendLine(vpnServices)
+        appendLine("TAILSCALE_STATUS")
+        appendLine(tailscaleService ?: "Служба Tailscale не обнаружена. Состояние авторизации не проверено.")
+        appendLine("TAILSCALE_IP")
+        appendLine("IP-адрес не запрашивался: CLI-команды могут быть запрещены ACL rpcd.")
+        appendLine("SING_BOX_VERSION")
+        appendLine(singBoxService ?: "Служба sing-box не обнаружена через rc.list.")
+        appendLine("TUNNEL_INTERFACES")
+        appendLine(tunnelHints.joinToString(", ").ifBlank { "Туннельные интерфейсы не обнаружены в ответе ubus." })
+        appendLine("VPN_PROCESS_STATS")
+        appendLine((tachyonServices + listOfNotNull(singBoxService)).joinToString("\n").ifBlank { "Метрики процессов недоступны через безопасный ubus-запрос." })
+        appendLine("ROUTES")
+        appendLine(if (interfaces != null) "Данные интерфейсов получены через network.interface.dump." else "Таблица интерфейсов недоступна.")
+        appendLine("VPN_LOGS")
+        appendLine(if (failures.isEmpty()) "Данные получены через ubus; проверка CLI-журнала не выполнялась."
+            else failures.joinToString("\n"))
+        appendLine("VPN_SERVICES")
+        appendLine(vpnServices)
+    }
+}
+
 private fun loadOverviewStorage(client: RouterApi): JSONArray {
     val failures = mutableListOf<String>()
     var mounts = runCatching { normalizeMounts(client.callArray("luci", "getMountPoints")) }
@@ -871,8 +931,9 @@ private fun OverviewScreen(s: Snapshot) {
         vpnProcesses.contains("xray", true) || vpnProcesses.contains("openvpn", true) || vpnProcesses.contains("wireguard", true)
     val vpnLabel = when {
         vpn.contains("Logged out", true) || vpn.contains("NeedsLogin", true) -> "Нужен вход"
-        vpnDetected -> "Обнаружен"
+        vpnDetected -> "Службы активны"
         vpn.isBlank() -> "Проверяем…"
+        vpn.contains("ACL", true) || vpn.contains("запретил", true) -> "Нет прав rpcd"
         else -> "Не найден"
     }
     LazyVerticalGrid(
@@ -915,7 +976,7 @@ private fun OverviewScreen(s: Snapshot) {
         }
         item {
             DashboardMiniCard("VPN / туннели", vpnLabel,
-                if (vpn.contains("Logged out", true)) "Tailscale: нет входа" else "Tailscale · sing-box · VLESS",
+                if (vpn.contains("Logged out", true)) "Tailscale: нет входа" else "Tailscale · Tachyon · sing-box · Podkop",
                 if (vpnLabel == "Нужен вход") androidx.compose.ui.graphics.Color(0xFFFFB454) else androidx.compose.ui.graphics.Color(0xFF5CC8FF),
                 Icons.Outlined.VpnKey)
         }
@@ -959,7 +1020,7 @@ private fun DashboardMetric(label: String, value: String, accent: androidx.compo
 @Composable
 private fun DashboardMiniCard(title: String, value: String, detail: String,
                               accent: androidx.compose.ui.graphics.Color, icon: androidx.compose.ui.graphics.vector.ImageVector) {
-    InfoCard(title) {
+    InfoCard(title, Modifier.heightIn(min = 112.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Icon(icon, null, tint = accent, modifier = Modifier.size(21.dp))
             Column(Modifier.weight(1f)) {
@@ -1900,6 +1961,7 @@ private fun VpnScreen(status: String?, onRefresh: () -> Unit) {
     val processStats = section("VPN_PROCESS_STATS", "ROUTES")
     val routes = section("ROUTES", "VPN_LOGS")
     val logs = section("VPN_LOGS")
+    val vpnServices = section("VPN_SERVICES")
     val tailscaleLoggedOut = tailscale.contains("Logged out", true) || tailscale.contains("NeedsLogin", true)
     LazyColumn(contentPadding = PaddingValues(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
@@ -1920,9 +1982,19 @@ private fun VpnScreen(status: String?, onRefresh: () -> Unit) {
         }
         item {
             InfoCard("sing-box · VLESS / прокси") {
-                Text(singBox.ifBlank { "Версия sing-box не получена." }, style = MaterialTheme.typography.bodySmall)
-                Text(processes.ifBlank { "Активные VPN-процессы не обнаружены." },
+                Text(singBox.ifBlank { "Состояние службы не получено." }, style = MaterialTheme.typography.bodySmall)
+                Text(processes.ifBlank { "Активные VPN-службы не обнаружены." },
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        item {
+            InfoCard("Службы VPN / Tachyon / Podkop") {
+                Text(vpnServices.ifBlank { "Службы не обнаружены или rpcd не разрешил запрос." },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (vpnServices.contains("ACL", true) || vpnServices.contains("запретил", true))
+                        MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Запущенная служба не означает, что VPN авторизован или передаёт трафик. Проверяй отдельно состояние подключения и маршруты.",
+                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         item {
@@ -1994,7 +2066,7 @@ private fun FirewallScreen(rules: String?, onRefresh: () -> Unit) {
 
 @Composable
 private fun SshScreen(host: String, defaultUser: String, connected: Boolean, connecting: Boolean,
-                      output: String, onConnect: (String, Int, String, String) -> Unit,
+                      output: String, error: String?, onConnect: (String, Int, String, String) -> Unit,
                       onSend: (String) -> Unit, onDisconnect: () -> Unit) {
     var hostValue by rememberSaveable(host) { mutableStateOf(host) }
     var portValue by rememberSaveable { mutableStateOf("22") }
@@ -2027,6 +2099,9 @@ private fun SshScreen(host: String, defaultUser: String, connected: Boolean, con
                 else Icon(Icons.Outlined.Terminal, null)
                 Spacer(Modifier.width(8.dp))
                 Text(if (connecting) "Подключение…" else "Открыть SSH-сессию")
+            }
+            if (!error.isNullOrBlank()) {
+                Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
             Text("По умолчанию используется порт 22. Пароль не сохраняется в истории терминала.",
                 style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
