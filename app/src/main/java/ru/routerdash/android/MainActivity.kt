@@ -940,7 +940,8 @@ private fun collectVpnStatus(client: RouterApi): String {
         appendLine("TAILSCALE_IP")
         appendLine(tailscaleIp.ifBlank { "IP не получен." })
         appendLine("SING_BOX_VERSION")
-        appendLine(singBoxVersion?.trim()?.ifBlank { null } ?: serviceRows.firstOrNull { it.contains("sing-box", true) }
+        appendLine(singBoxVersion?.trim()?.takeIf { it.isNotBlank() }
+            ?: serviceRows.firstOrNull { it.contains("sing-box", true) }
             ?: "Состояние sing-box не подтверждено.")
         appendLine("TUNNEL_INTERFACES")
         appendLine(tunnelText)
