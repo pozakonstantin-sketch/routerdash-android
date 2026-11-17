@@ -826,7 +826,10 @@ private fun collectVpnStatus(client: RouterApi): String {
     val singBoxService = serviceRows.firstOrNull { it.contains("sing-box", true) || it.contains("singbox", true) }
     val tachyonServices = serviceRows.filter { it.contains("tachyon", true) || it.contains("podkop", true) }
     val vpnServices = (serviceRows + if (installed.isNotBlank()) listOf("Пакеты обнаружены: $installed") else emptyList())
-        .distinct().joinToString("\n").ifBlank { "Службы VPN не обнаружены через rc.list." }
+        .distinct().joinToString("\n").ifBlank {
+            if (services == null) failures.joinToString("\n").ifBlank { "Не удалось получить список служб из rpcd." }
+            else "Службы VPN не обнаружены через rc.list."
+        }
 
     return buildString {
         appendLine("VPN_PROCESSES")
