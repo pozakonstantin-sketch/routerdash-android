@@ -843,7 +843,7 @@ private fun collectVpnStatus(client: RouterApi): String {
     val failures = mutableListOf<String>()
     val rcServices = runCatching { client.call("rc", "list") }
         .onFailure { failures += "rc.list: ${friendlyRouterError(it, "список init.d-служб недоступен")}" }.getOrNull()
-    val procdServices = runCatching { client.call("service", "list", JSONObject().put("verbose", true)) }
+    val procdServices = runCatching { client.call("service", "list", JSONObject().put("name", "").put("verbose", true)) }
         .onFailure { failures += "service.list: ${friendlyRouterError(it, "список procd-служб недоступен")}" }.getOrNull()
     val interfaces = runCatching { client.call("network.interface", "dump") }
         .onFailure { failures += "network.interface.dump: ${friendlyRouterError(it, "интерфейсы недоступны")}" }.getOrNull()
@@ -870,15 +870,25 @@ private fun collectVpnStatus(client: RouterApi): String {
             serviceRows += "rc:$name — $state$enabled"
         }
     }
+    fun hasRunningInstance(value: JSONObject): Boolean? {
+        if (value.has("running")) return value.optBoolean("running")
+        val childStates = value.keys().asSequence().mapNotNull { key ->
+            value.optJSONObject(key)?.let { hasRunningInstance(it) }
+        }.toList()
+        return when {
+            childStates.any { it == true } -> true
+            childStates.isNotEmpty() -> false
+            else -> null
+        }
+    }
     fun walkServices(obj: JSONObject) {
         obj.keys().asSequence().toList().sorted().forEach { name ->
             val value = obj.optJSONObject(name) ?: return@forEach
             if (keywords.any { name.contains(it, true) }) {
-                val state = when {
-                    value.has("running") && value.optBoolean("running") -> "работает"
-                    value.has("running") -> "остановлена"
-                    value.has("instances") -> "экземпляры зарегистрированы; процесс не подтверждён"
-                    else -> "зарегистрирована; состояние процесса неизвестно"
+                val state = when (hasRunningInstance(value)) {
+                    true -> "работает"
+                    false -> "остановлена"
+                    null -> "зарегистрирована; состояние процесса неизвестно"
                 }
                 serviceRows += "procd:$name — $state"
             }
