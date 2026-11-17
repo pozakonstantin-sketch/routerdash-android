@@ -820,8 +820,7 @@ private fun collectVpnStatus(client: RouterApi): String {
     val installed = keywords.filter { packageText.contains(it, ignoreCase = true) }
         .distinct().joinToString(", ")
     val interfaceText = interfaces?.toString().orEmpty()
-    val tunnelHints = Regex("""tailscale0|tun[0-9A-Za-z_.-]*|wg[0-9A-Za-z_.-]*|zt[0-9A-Za-z_.-]*""",
-        RegexOption.IGNORE_CASE).findAll(interfaceText).map { it.value }.distinct().toList()
+    val tunnelHints = Regex("""(?:^|[^A-Za-z0-9])(?:tailscale0|tun[0-9]+|wg[0-9]+|zt[0-9]+)(?:$|[^A-Za-z0-9])""", RegexOption.IGNORE_CASE).findAll(interfaceText).map { it.value }.distinct().toList()
 
     val tailscaleService = serviceRows.firstOrNull { it.contains("tailscale", true) }
     val singBoxService = serviceRows.firstOrNull { it.contains("sing-box", true) || it.contains("singbox", true) }
@@ -929,7 +928,7 @@ private fun OverviewScreen(s: Snapshot) {
     val vpnProcesses = vpn.substringAfter("VPN_PROCESSES", "").substringBefore("TAILSCALE_STATUS")
     val tunnelInterfaces = vpn.substringAfter("TUNNEL_INTERFACES", "").substringBefore("VPN_PROCESS_STATS")
     val vpnDetected = vpnProcesses.lineSequence().any { it.contains("— работает", true) } ||
-        Regex("""tailscale0|tun[0-9A-Za-z_.-]*|wg[0-9A-Za-z_.-]*|zt[0-9A-Za-z_.-]*""", RegexOption.IGNORE_CASE)
+        Regex("""(?:^|[^A-Za-z0-9])(?:tailscale0|tun[0-9]+|wg[0-9]+|zt[0-9]+)(?:$|[^A-Za-z0-9])""", RegexOption.IGNORE_CASE)
             .containsMatchIn(tunnelInterfaces)
     val vpnLabel = when {
         vpn.contains("Logged out", true) || vpn.contains("NeedsLogin", true) -> "Нужен вход"
