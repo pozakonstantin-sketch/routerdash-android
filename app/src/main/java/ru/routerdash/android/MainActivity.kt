@@ -561,6 +561,17 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                         Modifier.weight(1f).fillMaxHeight().widthIn(max = 1440.dp)
                             .padding(horizontal = if (isExpandedLayout) 28.dp else 16.dp)
                     ) {
+                    // Show the supplied reference icon inside the active section, not only in navigation.
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        RouterDashIcon(selected.ordinal + 1, selected.title, Modifier.size(56.dp))
+                        Text(selected.title, style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Bold)
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
                     if (error != null) {
                         ElevatedCard(Modifier.fillMaxWidth().padding(top = 8.dp)) {
                             Text(error!!, Modifier.padding(12.dp), color = MaterialTheme.colorScheme.error)
