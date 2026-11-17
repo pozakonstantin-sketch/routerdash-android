@@ -2,8 +2,6 @@ package ru.routerdash.android
 
 import android.content.Context
 import android.net.Uri
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -165,8 +163,10 @@ internal object SftpFileSync {
 }
 
 @Composable
-internal fun SyncScreen(sshConnected: Boolean, ssh: SshTerminal?, sshHostDefault: String, sshUserDefault: String, onOpenSsh: () -> Unit) {
+internal fun SyncScreen(sshConnected: Boolean, ssh: SshTerminal?, sshHostDefault: String, sshUserDefault: String,
+                        sshConnecting: Boolean, sshError: String?, onConnectSsh: () -> Unit, onOpenSsh: () -> Unit) {
     val context = LocalContext.current
+    val activity = context as? MainActivity
     val prefs = remember { context.getSharedPreferences("routerdash_sync", 0) }
     val scope = rememberCoroutineScope()
     var treeUriText by rememberSaveable { mutableStateOf(prefs.getString("tree_uri", "") ?: "") }
@@ -184,22 +184,14 @@ internal fun SyncScreen(sshConnected: Boolean, ssh: SshTerminal?, sshHostDefault
     var autoHost by rememberSaveable { mutableStateOf(securePrefs.getString("auto_sync_ssh_host", sshHostDefault) ?: sshHostDefault) }
     var autoUser by rememberSaveable { mutableStateOf(securePrefs.getString("auto_sync_ssh_user", sshUserDefault) ?: sshUserDefault) }
     var autoPassword by remember { mutableStateOf("") }
-    var autoPasswordSaved by remember { mutableStateOf(!securePrefs.getString("auto_sync_ssh_password", null).isNullOrBlank()) }
+    var autoPasswordSaved by remember { mutableStateOf(
+        !securePrefs.getString("auto_sync_ssh_password", null).isNullOrBlank() ||
+            !securePrefs.getString("password", null).isNullOrBlank()) }
     var autoPort by rememberSaveable { mutableStateOf(securePrefs.getInt("auto_sync_ssh_port", 22).toString()) }
     var autoInterval by rememberSaveable { mutableIntStateOf(prefs.getInt("auto_interval_minutes", 60).coerceIn(15, 1440)) }
     var autoStatus by remember { mutableStateOf(prefs.getString("auto_last_status", "Пока запусков не было.") ?: "Пока запусков не было.") }
     var autoError by remember { mutableStateOf<String?>(null) }
     val plan = remember { mutableStateListOf<SyncPlanItem>() }
-
-    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) {
-            runCatching { context.contentResolver.takePersistableUriPermission(uri,
-                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
-            treeUriText = uri.toString()
-            prefs.edit().putString("tree_uri", treeUriText).apply()
-            plan.clear(); errorText = null
-        }
-    }
 
     fun scanFiles() {
         val active = ssh
@@ -255,18 +247,42 @@ internal fun SyncScreen(sshConnected: Boolean, ssh: SshTerminal?, sshHostDefault
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (!sshConnected || ssh == null) item {
-            InfoCard("Нужно SSH-подключение") {
-                Text("Используется уже открытая SSH-сессия. Пароль повторно не запрашивается и не сохраняется.",
+            InfoCard("Подключение к роутеру") {
+                Text("RouterDash использует сохранённые зашифрованные учётные данные входа. Повторно вводить тот же пароль не нужно.",
                     style = MaterialTheme.typography.bodySmall)
-                Button(onClick = onOpenSsh, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Outlined.Terminal, null); Spacer(Modifier.width(8.dp)); Text("Открыть SSH-терминал")
+                if (!sshError.isNullOrBlank()) Text(sshError, color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall)
+                Button(onClick = onConnectSsh, enabled = !sshConnecting, modifier = Modifier.fillMaxWidth()) {
+                    if (sshConnecting) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    else Icon(Icons.Outlined.Terminal, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (sshConnecting) "Подключение…" else "Подключить SSH автоматически")
                 }
+                TextButton(onClick = onOpenSsh) { Text("Открыть настройки SSH вручную") }
             }
         }
         item {
             InfoCard("Папки синхронизации") {
                 Text("Телефон · $folderName", fontWeight = FontWeight.SemiBold)
-                OutlinedButton(onClick = { folderPicker.launch(null) }, modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(onClick = {
+                    if (activity == null) {
+                        errorText = "Не удалось открыть системный выбор папки."
+                    } else {
+                        runCatching {
+                            activity.launchSyncFolderPicker { uri ->
+                                if (uri != null) {
+                                    runCatching { context.contentResolver.takePersistableUriPermission(uri,
+                                        android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                            android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
+                                    treeUriText = uri.toString()
+                                    prefs.edit().putString("tree_uri", treeUriText).apply()
+                                    plan.clear()
+                                    errorText = null
+                                }
+                            }
+                        }.onFailure { errorText = it.message ?: "Не удалось открыть выбор папки." }
+                    }
+                }, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Outlined.Folder, null); Spacer(Modifier.width(8.dp)); Text("Выбрать папку телефона")
                 }
                 OutlinedTextField(remoteRoot, { remoteRoot = it }, Modifier.fillMaxWidth(),
@@ -357,21 +373,25 @@ internal fun SyncScreen(sshConnected: Boolean, ssh: SshTerminal?, sshHostDefault
                     Switch(checked = autoEnabled, onCheckedChange = { enabled ->
                         autoError = null
                         if (!enabled) {
-                            AutoPhotoSync.cancel(context)
-                            prefs.edit().putBoolean("auto_photo_enabled", false).apply()
-                            securePrefs.edit().remove("auto_sync_ssh_host").remove("auto_sync_ssh_user")
-                                .remove("auto_sync_ssh_password").remove("auto_sync_ssh_port").apply()
-                            autoEnabled = false
-                            autoPasswordSaved = false
-                            autoPassword = ""
-                            autoStatus = "Автозагрузка выключена."
+                            try {
+                                AutoPhotoSync.cancel(context)
+                                check(prefs.edit().putBoolean("auto_photo_enabled", false).commit()) {
+                                    "Не удалось сохранить состояние автозагрузки."
+                                }
+                                autoEnabled = false
+                                autoStatus = "Автозагрузка выключена. Сохранённые параметры подключения оставлены."
+                            } catch (e: Exception) {
+                                autoError = e.message ?: "Не удалось выключить автозагрузку."
+                            }
                         } else {
                             val port = autoPort.toIntOrNull()
                             if (treeUriText.isBlank()) autoError = "Сначала выбери папку телефона выше."
                             else if (autoHost.isBlank() || autoUser.isBlank() || port == null || port !in 1..65535)
                                 autoError = "Проверь SSH-адрес, пользователя и порт."
-                            else if (autoPassword.isBlank() && !autoPasswordSaved)
-                                autoError = "Для фонового подключения введи SSH-пароль."
+                            else if (autoPassword.isBlank() &&
+                                securePrefs.getString("auto_sync_ssh_password", null).isNullOrBlank() &&
+                                securePrefs.getString("password", null).isNullOrBlank())
+                                autoError = "Нет сохранённого пароля приложения. Войди в RouterDash или введи SSH-пароль."
                             else if (context.getSharedPreferences("routerdash_ssh_hosts", 0)
                                     .getString("${autoHost.trim()}:$port", null).isNullOrBlank())
                                 autoError = "Сначала подключись к этому роутеру через SSH-терминал и подтверди его host key."
@@ -380,17 +400,26 @@ internal fun SyncScreen(sshConnected: Boolean, ssh: SshTerminal?, sshHostDefault
                                     .putString("auto_sync_ssh_user", autoUser.trim())
                                     .putInt("auto_sync_ssh_port", port)
                                     .apply()
-                                if (autoPassword.isNotBlank()) {
-                                    securePrefs.edit().putString("auto_sync_ssh_password", autoPassword).apply()
-                                    autoPasswordSaved = true
-                                    autoPassword = ""
-                                }
-                                prefs.edit().putBoolean("auto_photo_enabled", true)
-                                    .putInt("auto_interval_minutes", autoInterval).apply()
+                                val workerPassword = autoPassword.takeIf { it.isNotBlank() }
+                                    ?: securePrefs.getString("auto_sync_ssh_password", null)
+                                    ?: securePrefs.getString("password", null)
+                                check(!workerPassword.isNullOrBlank()) { "Не найден пароль для фонового SSH-подключения." }
+                                securePrefs.edit().putString("auto_sync_ssh_password", workerPassword).apply()
                                 AutoPhotoSync.schedule(context, autoInterval.toLong())
+                                check(prefs.edit().putBoolean("auto_photo_enabled", true)
+                                    .putInt("auto_interval_minutes", autoInterval).commit()) {
+                                    "Не удалось сохранить настройки автозагрузки."
+                                }
                                 autoEnabled = true
+                                autoPasswordSaved = !securePrefs.getString("auto_sync_ssh_password", null).isNullOrBlank()
+                                autoPassword = ""
                                 autoStatus = "Автозагрузка включена. Первый запуск будет выполнен по расписанию."
-                            } catch (e: Exception) { autoError = e.message ?: "Не удалось включить автозагрузку." }
+                            } catch (e: Exception) {
+                                AutoPhotoSync.cancel(context)
+                                prefs.edit().putBoolean("auto_photo_enabled", false).apply()
+                                autoEnabled = false
+                                autoError = e.message ?: "Не удалось включить автозагрузку."
+                            }
                         }
                     })
                     Spacer(Modifier.width(8.dp))
