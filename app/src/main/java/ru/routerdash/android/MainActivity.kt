@@ -26,6 +26,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Painter
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
@@ -181,7 +185,7 @@ class MainActivity : FragmentActivity() {
 }
 
 private enum class Screen(val title: String) {
-    OVERVIEW("Обзор"), NETWORK("Сеть"), DEVICES("Устройства"), STORAGE("Диски"), PACKAGES("Пакеты"), DOWNLOADS("Загрузки"), SERVICES("Службы"), VPN("VPN"), FIREWALL("Правила"), SSH("SSH-терминал"), SYNC("Синхронизация"), LOGS("Журнал"), SETTINGS("Настройки")
+    OVERVIEW("Обзор"), NETWORK("Сеть"), DEVICES("Устройства"), STORAGE("Диски"), PACKAGES("Пакеты"), DOWNLOADS("Загрузки"), SERVICES("Службы"), VPN("VPN"), FIREWALL("Firewall"), SSH("SSH-терминал"), SYNC("Синхронизация"), LOGS("Журнал"), SETTINGS("Настройки")
 }
 private data class TrafficPoint(val rx: Long, val tx: Long)
 private data class Snapshot(
@@ -212,6 +216,8 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
     var error by remember { mutableStateOf<String?>(null) }
     var selected by rememberSaveable { mutableStateOf(Screen.OVERVIEW) }
     var refreshIntervalSeconds by rememberSaveable { mutableIntStateOf(prefs.getInt("refresh_interval", 5).coerceIn(3, 60)) }
+    var autoRefreshPaused by rememberSaveable { mutableStateOf(false) }
+    var savedCredentialsAvailable by remember { mutableStateOf(runCatching { !encryptedCredentials(context).getString("password", null).isNullOrBlank() }.getOrDefault(false)) }
     var biometricEnabled by remember { mutableStateOf(context.getSharedPreferences("routerdash_security", 0).getBoolean("biometric_enabled", false)) }
     var snapshot by remember { mutableStateOf(Snapshot()) }
     var previousCpu by remember { mutableStateOf<LongArray?>(null) }
@@ -224,6 +230,39 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
     var sshConnecting by remember { mutableStateOf(false) }
     var sshError by remember { mutableStateOf<String?>(null) }
     var sshOutput by remember { mutableStateOf("RouterDash SSH · готов к подключению\n") }
+
+    fun connectSsh(host: String, port: Int, user: String, enteredPassword: String? = null) {
+        if (sshConnecting) return
+        val savedPassword = runCatching { encryptedCredentials(context).getString("password", null) }.getOrNull()
+        val resolvedPassword = enteredPassword?.takeIf { it.isNotBlank() } ?: savedPassword
+        if (resolvedPassword.isNullOrBlank()) {
+            sshError = "Не найдены сохранённые данные входа. Введи SSH-пароль вручную."
+            selected = Screen.SSH
+            return
+        }
+        scope.launch {
+            sshConnecting = true
+            sshError = null
+            try {
+                val terminal = withContext(Dispatchers.IO) {
+                    SshTerminal(context).also { it.connect(host.trim(), port, user.trim(), resolvedPassword) }
+                }
+                sshSession?.let { old -> withContext(Dispatchers.IO) { old.close() } }
+                sshSession = terminal
+                sshConnected = true
+                sshOutput += "\n[SSH] Соединение установлено: $user@$host:$port\n[SSH] Host key: ${terminal.fingerprint}\n"
+                selected = Screen.SSH
+            } catch (e: Exception) {
+                sshError = when {
+                    e is SecurityException -> e.message ?: "Проверка SSH host key не пройдена."
+                    e.message?.contains("Auth fail", true) == true -> "Неверный пароль SSH или сервер отклонил авторизацию."
+                    e.message?.contains("timeout", true) == true -> "Истекло время ожидания SSH. Проверь адрес, порт и доступность роутера."
+                    else -> e.message ?: "Не удалось подключиться по SSH."
+                }
+                sshOutput += "\n[SSH ERROR] $sshError\n"
+            } finally { sshConnecting = false }
+        }
+    }
 
     fun refresh(screen: Screen = selected) {
         val client = api ?: return
@@ -327,7 +366,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                         }
                         Screen.PACKAGES -> snapshot.copy(packages = client.call("rpc-sys", "packagelist"))
                         Screen.DOWNLOADS -> snapshot.copy(downloads = client.aria2Overview())
-                        Screen.FIREWALL -> snapshot.copy(firewallRules = runCatching { client.execReadOnly("sh", listOf("-c", "echo UCI_FIREWALL; uci show firewall 2>/dev/null; echo NFT_RULESET; nft list ruleset 2>/dev/null | head -n 260")) }.getOrDefault("Не удалось прочитать правила firewall"))
+                        Screen.FIREWALL -> snapshot.copy(firewallRules = collectFirewallRules(client))
                         Screen.VPN -> snapshot.copy(vpnStatus = collectVpnStatus(client))
                         Screen.SERVICES -> snapshot.copy(
                             services = client.call("rc", "list"),
@@ -423,7 +462,10 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                 withContext(Dispatchers.IO) { newApi.login(username.trim(), password) }
                 api = newApi
                 prefs.edit().putString("url", newApi.baseUrl).apply()
-                runCatching { encryptedCredentials(context).edit().putString("url", newApi.baseUrl).putString("username", username.trim()).putString("password", password).apply() }
+                savedCredentialsAvailable = runCatching {
+                    encryptedCredentials(context).edit().putString("url", newApi.baseUrl)
+                        .putString("username", username.trim()).putString("password", password).commit()
+                }.getOrDefault(false)
                 connected = true
                 password = ""
                 refresh(Screen.OVERVIEW)
@@ -457,8 +499,8 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
         }
     }
 
-    LaunchedEffect(connected, selected, refreshIntervalSeconds) {
-        while (connected) {
+    LaunchedEffect(connected, selected, refreshIntervalSeconds, autoRefreshPaused) {
+        while (connected && !autoRefreshPaused) {
             refresh(selected)
             delay(refreshIntervalSeconds * 1000L)
         }
@@ -502,7 +544,10 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                                 Icon(Icons.Outlined.Settings, contentDescription = "Настройки приложения")
                             }
                             if (loading) CircularProgressIndicator(Modifier.size(20.dp))
-                            IconButton(onClick = { refresh() }) { Text("↻", style = MaterialTheme.typography.headlineSmall) }
+                            IconButton(onClick = { autoRefreshPaused = !autoRefreshPaused }) {
+                                Icon(if (autoRefreshPaused) Icons.Outlined.PlayArrow else Icons.Outlined.Pause,
+                                    contentDescription = if (autoRefreshPaused) "Возобновить автообновление" else "Поставить автообновление на паузу")
+                            }
                             IconButton(onClick = { scope.launch { withContext(Dispatchers.IO) { sshSession?.close() }; sshSession = null; sshConnected = false }; connected = false; api = null; selected = Screen.OVERVIEW }) {
                                 Icon(Icons.Outlined.Logout, contentDescription = "Отключиться")
                             }
@@ -514,9 +559,6 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                         Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 5.dp) {
                             Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                IconButton(onClick = { refresh() }, enabled = !loading) {
-                                    Icon(Icons.Outlined.Refresh, contentDescription = "Обновить")
-                                }
                                 Button(onClick = { showNavigationSheet = true },
                                     modifier = Modifier.weight(1f).height(48.dp),
                                     shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp)) {
@@ -542,25 +584,25 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                             }
                         ) {
                             val entries = listOf(
-                                Screen.OVERVIEW to Icons.Outlined.Dashboard,
-                                Screen.NETWORK to Icons.Outlined.Lan,
-                                Screen.DEVICES to Icons.Outlined.Devices,
-                                Screen.STORAGE to Icons.Outlined.Storage,
-                                Screen.PACKAGES to Icons.Outlined.Inventory2,
-                                Screen.DOWNLOADS to Icons.Outlined.Download,
-                                Screen.SERVICES to Icons.Outlined.MiscellaneousServices,
-                                Screen.VPN to Icons.Outlined.VpnKey,
-                                Screen.FIREWALL to Icons.Outlined.Security,
-                                Screen.SSH to Icons.Outlined.Terminal,
-                                Screen.SYNC to Icons.Outlined.Sync,
-                                Screen.LOGS to Icons.Outlined.Article,
-                                Screen.SETTINGS to Icons.Outlined.Tune
+                                Screen.OVERVIEW to R.drawable.ic_nav_overview,
+                                Screen.NETWORK to R.drawable.ic_nav_network,
+                                Screen.DEVICES to R.drawable.ic_nav_devices,
+                                Screen.STORAGE to R.drawable.ic_nav_disks,
+                                Screen.PACKAGES to R.drawable.ic_nav_packages,
+                                Screen.DOWNLOADS to R.drawable.ic_nav_downloads,
+                                Screen.SERVICES to R.drawable.ic_nav_services,
+                                Screen.VPN to R.drawable.ic_nav_vpn,
+                                Screen.FIREWALL to R.drawable.ic_nav_firewall,
+                                Screen.SSH to R.drawable.ic_nav_ssh,
+                                Screen.SYNC to R.drawable.ic_nav_sync,
+                                Screen.LOGS to R.drawable.ic_nav_logs,
+                                Screen.SETTINGS to R.drawable.ic_nav_settings
                             )
                             entries.forEach { (screen, icon) ->
                                 NavigationRailItem(
                                     selected = selected == screen,
                                     onClick = { selected = screen; refresh(screen) },
-                                    icon = { Icon(icon, contentDescription = screen.title) },
+                                    icon = { SectionNavigationIcon(painterResource(icon), selected == screen, screen.title) },
                                     label = { Text(screen.title, maxLines = 1) },
                                     alwaysShowLabel = false
                                 )
@@ -591,30 +633,16 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                             ssh = sshSession,
                             sshHostDefault = runCatching { URI(url).host ?: "192.168.1.1" }.getOrDefault("192.168.1.1"),
                             sshUserDefault = username,
+                            sshConnecting = sshConnecting,
+                            sshError = sshError,
+                            onConnectSsh = { connectSsh(runCatching { URI(url).host ?: "192.168.1.1" }.getOrDefault("192.168.1.1"), 22, username) },
                             onOpenSsh = { selected = Screen.SSH }
                         )
                         Screen.SSH -> SshScreen(
                             host = runCatching { URI(url).host ?: "192.168.1.1" }.getOrDefault("192.168.1.1"),
-                            defaultUser = username, connected = sshConnected, connecting = sshConnecting, output = sshOutput, error = sshError,
-                            onConnect = { host, port, user, pass ->
-                                scope.launch {
-                                    sshConnecting = true
-                                    sshError = null
-                                    try {
-                                        val terminal = withContext(Dispatchers.IO) { SshTerminal(context).also { it.connect(host, port, user, pass) } }
-                                        sshSession = terminal; sshConnected = true
-                                        sshOutput += "\n[SSH] Соединение установлено: $user@$host:$port\n[SSH] Host key: ${terminal.fingerprint}\n"
-                                    } catch (e: Exception) {
-                                        sshError = when {
-                                            e is SecurityException -> e.message ?: "Проверка SSH host key не пройдена."
-                                            e.message?.contains("Auth fail", true) == true -> "Неверный SSH-пароль или сервер отклонил выбранный способ авторизации."
-                                            e.message?.contains("timeout", true) == true -> "Истекло время ожидания SSH. Проверь адрес, порт и доступность роутера."
-                                            else -> e.message ?: "Не удалось подключиться по SSH."
-                                        }
-                                        sshOutput += "\n[SSH ERROR] $sshError\n"
-                                    } finally { sshConnecting = false }
-                                }
-                            },
+                            defaultUser = username, connected = sshConnected, connecting = sshConnecting,
+                            output = sshOutput, error = sshError, hasSavedCredentials = savedCredentialsAvailable,
+                            onConnect = { host, port, user, pass -> connectSsh(host, port, user, pass) },
                             onSend = { command -> scope.launch {
                                 try { withContext(Dispatchers.IO) { sshSession?.send(command) }; sshOutput += "\n$ $command\n" }
                                 catch (e: Exception) { sshOutput += "\n[SSH ERROR] ${e.message}\n" }
@@ -646,19 +674,19 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                     }
                     if (!isExpandedLayout && showNavigationSheet) {
                         val destinations = listOf(
-                            Screen.OVERVIEW to Icons.Outlined.Dashboard,
-                            Screen.NETWORK to Icons.Outlined.Lan,
-                            Screen.DEVICES to Icons.Outlined.Devices,
-                            Screen.STORAGE to Icons.Outlined.Storage,
-                            Screen.PACKAGES to Icons.Outlined.Inventory2,
-                            Screen.DOWNLOADS to Icons.Outlined.Download,
-                            Screen.SERVICES to Icons.Outlined.MiscellaneousServices,
-                            Screen.VPN to Icons.Outlined.VpnKey,
-                            Screen.FIREWALL to Icons.Outlined.Security,
-                            Screen.SSH to Icons.Outlined.Terminal,
-                            Screen.SYNC to Icons.Outlined.Sync,
-                            Screen.LOGS to Icons.Outlined.Article,
-                            Screen.SETTINGS to Icons.Outlined.Tune
+                            Screen.OVERVIEW to R.drawable.ic_nav_overview,
+                            Screen.NETWORK to R.drawable.ic_nav_network,
+                            Screen.DEVICES to R.drawable.ic_nav_devices,
+                            Screen.STORAGE to R.drawable.ic_nav_disks,
+                            Screen.PACKAGES to R.drawable.ic_nav_packages,
+                            Screen.DOWNLOADS to R.drawable.ic_nav_downloads,
+                            Screen.SERVICES to R.drawable.ic_nav_services,
+                            Screen.VPN to R.drawable.ic_nav_vpn,
+                            Screen.FIREWALL to R.drawable.ic_nav_firewall,
+                            Screen.SSH to R.drawable.ic_nav_ssh,
+                            Screen.SYNC to R.drawable.ic_nav_sync,
+                            Screen.LOGS to R.drawable.ic_nav_logs,
+                            Screen.SETTINGS to R.drawable.ic_nav_settings
                         )
                         ModalBottomSheet(onDismissRequest = { showNavigationSheet = false },
                             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -671,7 +699,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                                         NavigationDrawerItem(
                                             label = { Text(screen.title) }, selected = selected == screen,
                                             onClick = { showNavigationSheet = false; selected = screen; refresh(screen) },
-                                            icon = { Icon(icon, contentDescription = null) },
+                                            icon = { SectionNavigationIcon(painterResource(icon), selected == screen, null) },
                                             modifier = Modifier.padding(vertical = 3.dp),
                                             shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp)
                                         )
@@ -684,6 +712,25 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SectionNavigationIcon(icon: Painter, selected: Boolean, description: String?) {
+    val cyan = Color(0xFF00DDF2)
+    val blue = Color(0xFF168BFF)
+    Box(Modifier.size(38.dp), contentAlignment = Alignment.Center) {
+        Box(Modifier.size(34.dp).border(
+            width = if (selected) 2.dp else 1.4.dp,
+            brush = Brush.linearGradient(listOf(cyan, blue)),
+            shape = CircleShape
+        ), contentAlignment = Alignment.Center) {
+            Icon(painter = icon, contentDescription = description,
+                tint = if (selected) cyan else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(19.dp))
+        }
+        Box(Modifier.align(Alignment.TopEnd).padding(top = 1.dp, end = 1.dp)
+            .size(7.dp).background(Color(0xFF55EF45), CircleShape))
     }
 }
 
@@ -794,66 +841,150 @@ private fun SettingsScreen(
 
 private fun collectVpnStatus(client: RouterApi): String {
     val failures = mutableListOf<String>()
-    val services = runCatching { client.call("rc", "list") }
-        .onFailure { failures += "rc.list: ${friendlyRouterError(it, "службы недоступны")}" }
-        .getOrNull()
+    val rcServices = runCatching { client.call("rc", "list") }
+        .onFailure { failures += "rc.list: ${friendlyRouterError(it, "список init.d-служб недоступен")}" }.getOrNull()
+    val procdServices = runCatching { client.call("service", "list", JSONObject().put("verbose", true)) }
+        .onFailure { failures += "service.list: ${friendlyRouterError(it, "список procd-служб недоступен")}" }.getOrNull()
     val interfaces = runCatching { client.call("network.interface", "dump") }
-        .onFailure { failures += "network.interface.dump: ${friendlyRouterError(it, "интерфейсы недоступны")}" }
-        .getOrNull()
-    val packageList = runCatching { client.call("rpc-sys", "packagelist") }
-        .onFailure { failures += "rpc-sys.packagelist: ${friendlyRouterError(it, "список пакетов недоступен")}" }
-        .getOrNull()
+        .onFailure { failures += "network.interface.dump: ${friendlyRouterError(it, "интерфейсы недоступны")}" }.getOrNull()
+    val packages = runCatching { client.call("rpc-sys", "packagelist") }
+        .onFailure { failures += "rpc-sys.packagelist: ${friendlyRouterError(it, "список пакетов недоступен")}" }.getOrNull()
+    val procNetDev = runCatching { readUbusFile(client, "/proc/net/dev") }.onFailure {
+        failures += "/proc/net/dev: ${friendlyRouterError(it, "список сетевых устройств недоступен")}"
+    }.getOrNull().orEmpty()
+    val routes = runCatching { readUbusFile(client, "/proc/net/route") }.onFailure {
+        failures += "/proc/net/route: ${friendlyRouterError(it, "таблица маршрутов недоступна")}"
+    }.getOrNull().orEmpty()
 
-    val keywords = listOf("tailscale", "tachyon", "sing-box", "singbox", "podkop", "xray", "openvpn", "wireguard", "wg-quick")
+    val keywords = listOf("tailscale", "tachyon", "sing-box", "singbox", "podkop", "xray", "v2ray",
+        "mihomo", "passwall", "homeproxy", "openvpn", "wireguard", "wg-quick", "awg")
     val serviceRows = mutableListOf<String>()
-    services?.keys()?.asSequence()?.toList()?.sorted()?.forEach { name ->
+    rcServices?.keys()?.asSequence()?.toList()?.sorted()?.forEach { name ->
         if (keywords.any { name.contains(it, ignoreCase = true) }) {
-            val service = services.optJSONObject(name) ?: JSONObject()
+            val service = rcServices.optJSONObject(name) ?: JSONObject()
             val state = if (!service.has("running")) "состояние неизвестно"
                 else if (service.optBoolean("running")) "работает" else "остановлена"
             val enabled = if (service.has("enabled")) {
                 if (service.optBoolean("enabled")) ", автозапуск включён" else ", автозапуск выключен"
             } else ""
-            serviceRows += "$name — $state$enabled"
+            serviceRows += "rc:$name — $state$enabled"
         }
     }
-    val packageText = packageList?.toString().orEmpty()
+    fun walkServices(obj: JSONObject) {
+        obj.keys().asSequence().toList().sorted().forEach { name ->
+            val value = obj.optJSONObject(name) ?: return@forEach
+            if (keywords.any { name.contains(it, true) }) {
+                val state = when {
+                    value.has("running") && value.optBoolean("running") -> "работает"
+                    value.has("running") -> "остановлена"
+                    value.has("instances") -> "экземпляры зарегистрированы; процесс не подтверждён"
+                    else -> "зарегистрирована; состояние процесса неизвестно"
+                }
+                serviceRows += "procd:$name — $state"
+            }
+            walkServices(value)
+        }
+    }
+    procdServices?.let { walkServices(it) }
+
+    val packageText = packages?.toString().orEmpty()
     val installed = keywords.filter { packageText.contains(it, ignoreCase = true) }
         .distinct().joinToString(", ")
-    val interfaceText = interfaces?.toString().orEmpty()
-    val tunnelHints = Regex("""(?:^|[^A-Za-z0-9])(?:tailscale0|tun[0-9]+|wg[0-9]+|zt[0-9]+)(?:$|[^A-Za-z0-9])""", RegexOption.IGNORE_CASE).findAll(interfaceText).map { it.value }.distinct().toList()
-
-    val tailscaleService = serviceRows.firstOrNull { it.contains("tailscale", true) }
-    val singBoxService = serviceRows.firstOrNull { it.contains("sing-box", true) || it.contains("singbox", true) }
-    val tachyonServices = serviceRows.filter { it.contains("tachyon", true) || it.contains("podkop", true) }
-    val vpnServices = (serviceRows + if (installed.isNotBlank()) listOf("Пакеты обнаружены: $installed") else emptyList())
-        .distinct().joinToString("\n").ifBlank {
-            if (services == null) failures.joinToString("\n").ifBlank { "Не удалось получить список служб из rpcd." }
-            else "Службы VPN не обнаружены через rc.list."
+    val interfaceNames = mutableListOf<String>()
+    val ifaceArray = interfaces?.optJSONArray("interface")
+    if (ifaceArray != null) for (i in 0 until ifaceArray.length()) {
+        val iface = ifaceArray.optJSONObject(i) ?: continue
+        listOf("interface", "device", "l3_device").forEach { key ->
+            val name = iface.optString(key).takeIf { it.isNotBlank() && it != "null" } ?: return@forEach
+            if (Regex("""(?i)(tailscale|tun|wg|awg|zt|sing|xray|vless|ppp)""").containsMatchIn(name))
+                interfaceNames += "$name ${if (iface.optBoolean("up")) "(up)" else "(state unknown)"}"
         }
-
+    }
+    procNetDev.lineSequence().drop(2).forEach { line ->
+        val name = line.substringBefore(':').trim()
+        if (name.isNotBlank() && Regex("""(?i)(tailscale|tun|wg|awg|zt|sing|xray|vless|ppp)""").containsMatchIn(name))
+            interfaceNames += name
+    }
+    val tailscaleJson = runCatching { client.execReadOnly("tailscale", listOf("status", "--json")) }
+        .onFailure { failures += "tailscale status: ${friendlyRouterError(it, "статус Tailscale недоступен")}" }.getOrNull()
+    val tailscaleStatus = tailscaleJson?.let { raw ->
+        runCatching {
+            val json = JSONObject(raw)
+            val backend = json.optString("BackendState", "Unknown")
+            val self = json.optJSONObject("Self")
+            val ips = self?.optJSONArray("TailscaleIPs")
+            val ipText = if (ips == null) "" else (0 until ips.length()).map { ips.optString(it) }.joinToString(", ")
+            "BackendState: $backend" + if (ipText.isBlank()) "" else "\nTailscale IP: $ipText"
+        }.getOrDefault(raw.take(1200))
+    } ?: serviceRows.firstOrNull { it.contains("tailscale", true) }
+        ?: "Статус Tailscale не получен (CLI может быть ограничен ACL rpcd)."
+    val tailscaleIp = Regex("""(?m)Tailscale IP: (.+)$""").find(tailscaleStatus)?.groupValues?.get(1).orEmpty()
+    val singBoxVersion = runCatching { client.execReadOnly("sing-box", listOf("version")) }
+        .onFailure { failures += "sing-box version: ${friendlyRouterError(it, "версия sing-box недоступна")}" }
+        .getOrNull()
+    val vpnServices = (serviceRows.distinct() +
+        if (installed.isNotBlank()) listOf("Установленные пакеты (не подтверждает запуск): $installed") else emptyList())
+        .joinToString("\n").ifBlank {
+            if (rcServices == null && procdServices == null)
+                failures.joinToString("\n").ifBlank { "rpcd не вернул список VPN-служб." }
+            else "Подходящие службы не найдены в rc.list и service.list."
+        }
+    val tunnelText = interfaceNames.distinct().joinToString(", ").ifBlank {
+        "VPN-интерфейсы не найдены в network.interface.dump и /proc/net/dev."
+    }
     return buildString {
         appendLine("VPN_PROCESSES")
         appendLine(vpnServices)
         appendLine("TAILSCALE_STATUS")
-        appendLine(tailscaleService ?: "Служба Tailscale не обнаружена. Состояние авторизации не проверено.")
+        appendLine(tailscaleStatus)
         appendLine("TAILSCALE_IP")
-        appendLine("IP-адрес не запрашивался: CLI-команды могут быть запрещены ACL rpcd.")
+        appendLine(tailscaleIp.ifBlank { "IP не получен." })
         appendLine("SING_BOX_VERSION")
-        appendLine(singBoxService ?: "Служба sing-box не обнаружена через rc.list.")
+        appendLine(singBoxVersion?.trim()?.ifBlank { null } ?: serviceRows.firstOrNull { it.contains("sing-box", true) }
+            ?: "Состояние sing-box не подтверждено.")
         appendLine("TUNNEL_INTERFACES")
-        appendLine(tunnelHints.joinToString(", ").ifBlank { "Туннельные интерфейсы не обнаружены в ответе ubus." })
+        appendLine(tunnelText)
         appendLine("VPN_PROCESS_STATS")
-        appendLine((tachyonServices + listOfNotNull(singBoxService)).joinToString("\n").ifBlank { "Метрики процессов недоступны через безопасный ubus-запрос." })
+        appendLine("Статистика процессов не запрашивается без разрешённого read-only RPC.")
         appendLine("ROUTES")
-        appendLine(if (interfaces != null) "Данные интерфейсов получены через network.interface.dump." else "Таблица интерфейсов недоступна.")
+        appendLine(routes.ifBlank { "Таблица маршрутов недоступна." })
         appendLine("VPN_LOGS")
-        appendLine(if (failures.isEmpty()) "Данные получены через ubus; проверка CLI-журнала не выполнялась."
-            else failures.joinToString("\n"))
+        appendLine(failures.joinToString("\n").ifBlank { "Ошибок RPC при чтении диагностики нет." })
         appendLine("VPN_SERVICES")
         appendLine(vpnServices)
     }
 }
+
+private fun collectFirewallRules(client: RouterApi): String {
+    val failures = mutableListOf<String>()
+    val uciFile = runCatching { readUbusFile(client, "/etc/config/firewall") }
+        .onFailure { failures += "file.read /etc/config/firewall: ${friendlyRouterError(it, "конфигурация firewall недоступна")}" }
+        .getOrNull().orEmpty()
+    val uciRpc = if (uciFile.isBlank()) runCatching {
+        client.call("uci", "get", JSONObject().put("config", "firewall")).toString(2)
+    }.onFailure { failures += "uci.get firewall: ${friendlyRouterError(it, "конфигурация UCI недоступна")}" }.getOrNull().orEmpty() else ""
+    val nft = runCatching {
+        client.execReadOnly("/usr/sbin/nft", listOf("--terse", "--json", "list", "ruleset"))
+    }.onFailure { failures += "nft ruleset: ${friendlyRouterError(it, "активные правила nftables недоступны")}" }.getOrNull().orEmpty()
+    val runtime = runCatching {
+        client.call("service", "get_data", JSONObject().put("type", "firewall")).toString(2)
+    }.onFailure { failures += "service.get_data firewall: ${friendlyRouterError(it, "runtime firewall data недоступны")}" }.getOrNull().orEmpty()
+    val interfaces = runCatching { client.call("network.interface", "dump").toString(2) }
+        .onFailure { failures += "network.interface.dump: ${friendlyRouterError(it, "данные интерфейсов недоступны")}" }.getOrNull().orEmpty()
+    return buildString {
+        appendLine("UCI_FIREWALL")
+        appendLine(uciFile.ifBlank { uciRpc.ifBlank { "Не удалось прочитать /etc/config/firewall через file.read или uci.get." } })
+        appendLine("NFT_RULESET")
+        appendLine(nft.ifBlank { "Активный nft ruleset не получен. Проверь ACL rpcd для /usr/sbin/nft --terse --json list ruleset." })
+        appendLine("FIREWALL_SERVICE_DATA")
+        appendLine(runtime.ifBlank { "procd не вернул firewall service data." })
+        appendLine("FIREWALL_INTERFACES")
+        appendLine(interfaces.ifBlank { "Данные интерфейсов недоступны." })
+        appendLine("FIREWALL_ERRORS")
+        appendLine(failures.joinToString("\n").ifBlank { "Ошибок чтения не обнаружено." })
+    }
+}
+
 
 private fun loadOverviewStorage(client: RouterApi): JSONArray {
     val failures = mutableListOf<String>()
@@ -2037,33 +2168,53 @@ private fun VpnScreen(status: String?, onRefresh: () -> Unit) {
 @Composable
 private fun FirewallScreen(rules: String?, onRefresh: () -> Unit) {
     val text = rules.orEmpty()
-    val sections = text.split("NFT_RULESET")
-    val uci = sections.firstOrNull().orEmpty().substringAfter("UCI_FIREWALL", "")
-    val nft = sections.getOrNull(1).orEmpty()
+    fun section(name: String, next: String? = null): String {
+        val value = text.substringAfter(name, "")
+        return (if (next == null) value else value.substringBefore(next)).trim()
+    }
+    val uci = section("UCI_FIREWALL", "NFT_RULESET")
+    val nft = section("NFT_RULESET", "FIREWALL_SERVICE_DATA")
+    val runtime = section("FIREWALL_SERVICE_DATA", "FIREWALL_INTERFACES")
+    val interfaces = section("FIREWALL_INTERFACES", "FIREWALL_ERRORS")
+    val errors = section("FIREWALL_ERRORS")
     val uciLines = uci.lines().filter { it.isNotBlank() }
     val nftLines = nft.lines().filter { it.isNotBlank() }
     LazyColumn(contentPadding = PaddingValues(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Правила firewall", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, null) }
-            }
-            Text("Настройки зон, перенаправлений портов и фактические правила nftables (firewall4).",
+            Text("Firewall", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("Конфигурация UCI, активные правила nftables и данные firewall4. Режим только для чтения.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         item {
-            InfoCard("Конфигурация UCI · ${uciLines.size} строк") {
-                Text(if (uciLines.isEmpty()) "Конфигурация firewall не получена." else uciLines.joinToString("\n"),
+            InfoCard("Конфигурация /etc/config/firewall · ${uciLines.size} строк") {
+                Text(if (uciLines.isEmpty()) "Конфигурация firewall не получена." else uci,
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
             }
         }
         item {
             InfoCard("Активные правила nftables · ${nftLines.size} строк") {
-                Text(if (nftLines.isEmpty()) "Не удалось прочитать nft ruleset. Проверь наличие nftables." else nftLines.joinToString("\n"),
+                Text(if (nftLines.isEmpty()) "Активный nft ruleset не получен. Это не означает, что правил нет." else nft,
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+            }
+        }
+        if (runtime.isNotBlank()) item {
+            InfoCard("Данные firewall4 / procd") {
+                Text(runtime, style = MaterialTheme.typography.bodySmall,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+            }
+        }
+        if (interfaces.isNotBlank()) item {
+            InfoCard("Зоны и интерфейсы") {
+                Text(interfaces, style = MaterialTheme.typography.bodySmall,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+            }
+        }
+        if (errors.isNotBlank()) item {
+            InfoCard("Диагностика доступа") {
+                Text(errors, color = if (errors.contains("ACL", true)) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall)
             }
         }
     }
@@ -2071,12 +2222,14 @@ private fun FirewallScreen(rules: String?, onRefresh: () -> Unit) {
 
 @Composable
 private fun SshScreen(host: String, defaultUser: String, connected: Boolean, connecting: Boolean,
-                      output: String, error: String?, onConnect: (String, Int, String, String) -> Unit,
+                      output: String, error: String?, hasSavedCredentials: Boolean,
+                      onConnect: (String, Int, String, String) -> Unit,
                       onSend: (String) -> Unit, onDisconnect: () -> Unit) {
     var hostValue by rememberSaveable(host) { mutableStateOf(host) }
     var portValue by rememberSaveable { mutableStateOf("22") }
     var userValue by rememberSaveable(defaultUser) { mutableStateOf(defaultUser) }
     var passwordValue by remember { mutableStateOf("") }
+    var manualPassword by rememberSaveable { mutableStateOf(!hasSavedCredentials) }
     var command by rememberSaveable { mutableStateOf("") }
     Column(Modifier.fillMaxSize().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("SSH-консоль", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
@@ -2091,19 +2244,30 @@ private fun SshScreen(host: String, defaultUser: String, connected: Boolean, con
                 OutlinedTextField(userValue, { userValue = it }, Modifier.weight(0.65f),
                     label = { Text("Пользователь") }, singleLine = true)
             }
-            OutlinedTextField(passwordValue, { passwordValue = it }, Modifier.fillMaxWidth(),
-                label = { Text("Пароль SSH") }, visualTransformation = PasswordVisualTransformation(), singleLine = true)
+            if (hasSavedCredentials && !manualPassword) {
+                Text("Используются логин и пароль, сохранённые при входе в RouterDash. Повторно вводить пароль не нужно.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                TextButton(onClick = { manualPassword = true }) { Text("Ввести другой SSH-пароль") }
+            } else {
+                OutlinedTextField(passwordValue, { passwordValue = it }, Modifier.fillMaxWidth(),
+                    label = { Text("Пароль SSH") }, visualTransformation = PasswordVisualTransformation(), singleLine = true)
+                if (hasSavedCredentials) TextButton(onClick = { manualPassword = false; passwordValue = "" }) {
+                    Text("Использовать пароль входа в приложение")
+                }
+            }
             Button(onClick = {
                 val port = portValue.toIntOrNull() ?: 22
-                if (hostValue.isNotBlank() && userValue.isNotBlank() && passwordValue.isNotBlank() && port in 1..65535)
-                    onConnect(hostValue, port, userValue, passwordValue)
+                if (hostValue.isNotBlank() && userValue.isNotBlank() && port in 1..65535 &&
+                    (!manualPassword || passwordValue.isNotBlank()))
+                    onConnect(hostValue, port, userValue, if (manualPassword) passwordValue else "")
             }, enabled = !connecting && hostValue.isNotBlank() && userValue.isNotBlank() &&
-                passwordValue.isNotBlank() && (portValue.toIntOrNull() ?: 0) in 1..65535,
+                (!manualPassword || passwordValue.isNotBlank()) && (portValue.toIntOrNull() ?: 0) in 1..65535,
                 modifier = Modifier.fillMaxWidth()) {
                 if (connecting) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                 else Icon(Icons.Outlined.Terminal, null)
                 Spacer(Modifier.width(8.dp))
-                Text(if (connecting) "Подключение…" else "Открыть SSH-сессию")
+                Text(if (connecting) "Подключение…" else if (hasSavedCredentials && !manualPassword)
+                    "Подключиться с паролем приложения" else "Открыть SSH-сессию")
             }
             if (!error.isNullOrBlank()) {
                 Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
