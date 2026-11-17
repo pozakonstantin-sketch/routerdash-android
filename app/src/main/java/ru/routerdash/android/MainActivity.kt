@@ -1078,7 +1078,7 @@ private fun OverviewScreen(s: Snapshot) {
     val vpnProcesses = vpn.substringAfter("VPN_PROCESSES", "").substringBefore("TAILSCALE_STATUS")
     val tunnelInterfaces = vpn.substringAfter("TUNNEL_INTERFACES", "").substringBefore("VPN_PROCESS_STATS")
     val vpnDetected = vpnProcesses.lineSequence().any { it.contains("— работает", true) } ||
-        Regex("""(?:^|[^A-Za-z0-9])(?:tailscale0|tun[0-9]+|wg[0-9]+|zt[0-9]+)(?:$|[^A-Za-z0-9])""", RegexOption.IGNORE_CASE)
+        Regex("""(?i)(?:tailscale[0-9]*|[A-Za-z0-9_-]*tun[0-9]+|wg[0-9]+|awg[0-9]+|zt[0-9]+|ppp[0-9]+)""")
             .containsMatchIn(tunnelInterfaces)
     val vpnLabel = when {
         vpn.contains("Logged out", true) || vpn.contains("NeedsLogin", true) -> "Нужен вход"
