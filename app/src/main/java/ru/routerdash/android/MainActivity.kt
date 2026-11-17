@@ -927,8 +927,10 @@ private fun OverviewScreen(s: Snapshot) {
     val diskPercent = if (diskTotal > 0L) (diskUsed * 100L / diskTotal).toInt() else -1
     val vpn = s.vpnStatus.orEmpty()
     val vpnProcesses = vpn.substringAfter("VPN_PROCESSES", "").substringBefore("TAILSCALE_STATUS")
-    val vpnDetected = vpnProcesses.contains("tailscale", true) || vpnProcesses.contains("sing-box", true) ||
-        vpnProcesses.contains("xray", true) || vpnProcesses.contains("openvpn", true) || vpnProcesses.contains("wireguard", true)
+    val tunnelInterfaces = vpn.substringAfter("TUNNEL_INTERFACES", "").substringBefore("VPN_PROCESS_STATS")
+    val vpnDetected = vpnProcesses.lineSequence().any { it.contains("— работает", true) } ||
+        Regex("""tailscale0|tun[0-9A-Za-z_.-]*|wg[0-9A-Za-z_.-]*|zt[0-9A-Za-z_.-]*""", RegexOption.IGNORE_CASE)
+            .containsMatchIn(tunnelInterfaces)
     val vpnLabel = when {
         vpn.contains("Logged out", true) || vpn.contains("NeedsLogin", true) -> "Нужен вход"
         vpnDetected -> "Службы активны"
