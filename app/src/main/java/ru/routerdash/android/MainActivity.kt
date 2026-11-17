@@ -8,6 +8,7 @@ import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.horizontalScroll
@@ -23,6 +24,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
@@ -142,7 +146,7 @@ class MainActivity : FragmentActivity() {
 }
 
 private enum class Screen(val title: String) {
-    OVERVIEW("Обзор"), NETWORK("Сеть"), DEVICES("Устройства"), STORAGE("Диски"), PACKAGES("Пакеты"), DOWNLOADS("Загрузки"), SERVICES("Службы"), VPN("VPN"), FIREWALL("Правила"), SSH("SSH-терминал"), SYNC("Синхронизация"), LOGS("Журнал"), SETTINGS("Настройки")
+    OVERVIEW("Обзор"), NETWORK("Сеть"), DEVICES("Устройства"), STORAGE("Диски"), PACKAGES("Пакеты"), DOWNLOADS("Загрузки"), SERVICES("Службы"), VPN("VPN"), FIREWALL("Firewall"), SSH("SSH-терминал"), SYNC("Синхронизация"), LOGS("Журнал"), SETTINGS("Настройки")
 }
 private data class TrafficPoint(val rx: Long, val tx: Long)
 private data class Snapshot(
@@ -510,25 +514,25 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                             }
                         ) {
                             val entries = listOf(
-                                Screen.OVERVIEW to Icons.Outlined.Dashboard,
-                                Screen.NETWORK to Icons.Outlined.Lan,
-                                Screen.DEVICES to Icons.Outlined.Devices,
-                                Screen.STORAGE to Icons.Outlined.Storage,
-                                Screen.PACKAGES to Icons.Outlined.Inventory2,
-                                Screen.DOWNLOADS to Icons.Outlined.Download,
-                                Screen.SERVICES to Icons.Outlined.MiscellaneousServices,
-                                Screen.VPN to Icons.Outlined.VpnKey,
-                                Screen.FIREWALL to Icons.Outlined.Security,
-                                Screen.SSH to Icons.Outlined.Terminal,
-                                Screen.SYNC to Icons.Outlined.Sync,
-                                Screen.LOGS to Icons.Outlined.Article,
-                                Screen.SETTINGS to Icons.Outlined.Tune
+                                Screen.OVERVIEW to R.drawable.ic_nav_overview,
+                            Screen.NETWORK to R.drawable.ic_nav_network,
+                            Screen.DEVICES to R.drawable.ic_nav_devices,
+                            Screen.STORAGE to R.drawable.ic_nav_disks,
+                            Screen.PACKAGES to R.drawable.ic_nav_packages,
+                            Screen.DOWNLOADS to R.drawable.ic_nav_downloads,
+                            Screen.SERVICES to R.drawable.ic_nav_services,
+                            Screen.VPN to R.drawable.ic_nav_vpn,
+                            Screen.FIREWALL to R.drawable.ic_nav_firewall,
+                            Screen.SSH to R.drawable.ic_nav_ssh,
+                            Screen.SYNC to R.drawable.ic_nav_sync,
+                            Screen.LOGS to R.drawable.ic_nav_logs,
+                            Screen.SETTINGS to R.drawable.ic_nav_settings
                             )
                             entries.forEach { (screen, icon) ->
                                 NavigationRailItem(
                                     selected = selected == screen,
                                     onClick = { selected = screen; refresh(screen) },
-                                    icon = { Icon(icon, contentDescription = screen.title) },
+                                    icon = { SectionNavigationIcon(painterResource(icon), selected == screen, screen.title) },
                                     label = { Text(screen.title, maxLines = 1) },
                                     alwaysShowLabel = false
                                 )
@@ -606,19 +610,19 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                     }
                     if (!isExpandedLayout && showNavigationSheet) {
                         val destinations = listOf(
-                            Screen.OVERVIEW to Icons.Outlined.Dashboard,
-                            Screen.NETWORK to Icons.Outlined.Lan,
-                            Screen.DEVICES to Icons.Outlined.Devices,
-                            Screen.STORAGE to Icons.Outlined.Storage,
-                            Screen.PACKAGES to Icons.Outlined.Inventory2,
-                            Screen.DOWNLOADS to Icons.Outlined.Download,
-                            Screen.SERVICES to Icons.Outlined.MiscellaneousServices,
-                            Screen.VPN to Icons.Outlined.VpnKey,
-                            Screen.FIREWALL to Icons.Outlined.Security,
-                            Screen.SSH to Icons.Outlined.Terminal,
-                            Screen.SYNC to Icons.Outlined.Sync,
-                            Screen.LOGS to Icons.Outlined.Article,
-                            Screen.SETTINGS to Icons.Outlined.Tune
+                            Screen.OVERVIEW to R.drawable.ic_nav_overview,
+                            Screen.NETWORK to R.drawable.ic_nav_network,
+                            Screen.DEVICES to R.drawable.ic_nav_devices,
+                            Screen.STORAGE to R.drawable.ic_nav_disks,
+                            Screen.PACKAGES to R.drawable.ic_nav_packages,
+                            Screen.DOWNLOADS to R.drawable.ic_nav_downloads,
+                            Screen.SERVICES to R.drawable.ic_nav_services,
+                            Screen.VPN to R.drawable.ic_nav_vpn,
+                            Screen.FIREWALL to R.drawable.ic_nav_firewall,
+                            Screen.SSH to R.drawable.ic_nav_ssh,
+                            Screen.SYNC to R.drawable.ic_nav_sync,
+                            Screen.LOGS to R.drawable.ic_nav_logs,
+                            Screen.SETTINGS to R.drawable.ic_nav_settings
                         )
                         ModalBottomSheet(onDismissRequest = { showNavigationSheet = false },
                             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -631,7 +635,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                                         NavigationDrawerItem(
                                             label = { Text(screen.title) }, selected = selected == screen,
                                             onClick = { showNavigationSheet = false; selected = screen; refresh(screen) },
-                                            icon = { Icon(icon, contentDescription = null) },
+                                            icon = { SectionNavigationIcon(painterResource(icon), selected == screen, null) },
                                             modifier = Modifier.padding(vertical = 3.dp),
                                             shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp)
                                         )
@@ -644,6 +648,38 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                 }
             }
         }
+    }
+}
+
+
+@Composable
+private fun SectionNavigationIcon(
+    icon: Painter,
+    selected: Boolean,
+    description: String?
+) {
+    val cyan = Color(0xFF00DDF2)
+    val blue = Color(0xFF168BFF)
+    Box(Modifier.size(38.dp), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier.size(34.dp).border(
+                width = if (selected) 2.dp else 1.4.dp,
+                brush = Brush.linearGradient(listOf(cyan, blue)),
+                shape = CircleShape
+            ),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                painter = icon,
+                contentDescription = description,
+                tint = if (selected) cyan else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(19.dp)
+            )
+        }
+        Box(
+            Modifier.align(Alignment.TopEnd).padding(top = 1.dp, end = 1.dp)
+                .size(7.dp).background(Color(0xFF55EF45), CircleShape)
+        )
     }
 }
 
