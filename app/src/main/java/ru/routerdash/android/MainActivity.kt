@@ -7,6 +7,7 @@ import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -23,13 +24,20 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -51,6 +59,21 @@ import com.jcraft.jsch.Session
 import java.io.InputStream
 import java.io.ByteArrayOutputStream
 import java.io.OutputStream
+
+@Composable
+private fun RouterDashIcon(index: Int, description: String?, modifier: Modifier = Modifier.size(40.dp)) {
+    val atlas = remember { ImageBitmap.imageResource(R.drawable.routerdash_icons_atlas) }
+    val cellSize = atlas.width / 4
+    Canvas(modifier.semantics { contentDescription = description.orEmpty() }) {
+        drawImage(
+            image = atlas,
+            srcOffset = IntOffset((index % 4) * cellSize, (index / 4) * cellSize),
+            srcSize = IntSize(cellSize, cellSize),
+            dstSize = IntSize(size.width.toInt(), size.height.toInt()),
+            filterQuality = FilterQuality.Medium
+        )
+    }
+}
 
 class MainActivity : FragmentActivity() {
     private val securityPrefs by lazy { getSharedPreferences("routerdash_security", MODE_PRIVATE) }
@@ -142,7 +165,7 @@ class MainActivity : FragmentActivity() {
 }
 
 private enum class Screen(val title: String) {
-    OVERVIEW("Обзор"), NETWORK("Сеть"), DEVICES("Устройства"), STORAGE("Диски"), PACKAGES("Пакеты"), DOWNLOADS("Загрузки"), SERVICES("Службы"), VPN("VPN"), FIREWALL("Правила"), SSH("SSH-терминал"), SYNC("Синхронизация"), LOGS("Журнал"), SETTINGS("Настройки")
+    OVERVIEW("Обзор"), NETWORK("Сеть"), DEVICES("Устройства"), STORAGE("Диски"), PACKAGES("Пакеты"), DOWNLOADS("Загрузки"), SERVICES("Службы"), VPN("VPN"), FIREWALL("Firewall"), SSH("SSH-терминал"), SYNC("Синхронизация"), LOGS("Журнал"), SETTINGS("Настройки")
 }
 private data class TrafficPoint(val rx: Long, val tx: Long)
 private data class Snapshot(
@@ -505,30 +528,29 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                         NavigationRail(
                             containerColor = MaterialTheme.colorScheme.surface,
                             header = {
-                                Icon(Icons.Outlined.Router, contentDescription = "RouterDash",
-                                    modifier = Modifier.padding(vertical = 12.dp).size(28.dp))
+                                RouterDashIcon(0, "RouterDash", Modifier.padding(vertical = 12.dp).size(48.dp))
                             }
                         ) {
                             val entries = listOf(
-                                Screen.OVERVIEW to Icons.Outlined.Dashboard,
-                                Screen.NETWORK to Icons.Outlined.Lan,
-                                Screen.DEVICES to Icons.Outlined.Devices,
-                                Screen.STORAGE to Icons.Outlined.Storage,
-                                Screen.PACKAGES to Icons.Outlined.Inventory2,
-                                Screen.DOWNLOADS to Icons.Outlined.Download,
-                                Screen.SERVICES to Icons.Outlined.MiscellaneousServices,
-                                Screen.VPN to Icons.Outlined.VpnKey,
-                                Screen.FIREWALL to Icons.Outlined.Security,
-                                Screen.SSH to Icons.Outlined.Terminal,
-                                Screen.SYNC to Icons.Outlined.Sync,
-                                Screen.LOGS to Icons.Outlined.Article,
-                                Screen.SETTINGS to Icons.Outlined.Tune
+                                Screen.OVERVIEW to 1,
+                                Screen.NETWORK to 2,
+                                Screen.DEVICES to 3,
+                                Screen.STORAGE to 4,
+                                Screen.PACKAGES to 5,
+                                Screen.DOWNLOADS to 6,
+                                Screen.SERVICES to 7,
+                                Screen.VPN to 8,
+                                Screen.FIREWALL to 9,
+                                Screen.SSH to 10,
+                                Screen.SYNC to 11,
+                                Screen.LOGS to 12,
+                                Screen.SETTINGS to 13
                             )
-                            entries.forEach { (screen, icon) ->
+                            entries.forEach { (screen, iconIndex) ->
                                 NavigationRailItem(
                                     selected = selected == screen,
                                     onClick = { selected = screen; refresh(screen) },
-                                    icon = { Icon(icon, contentDescription = screen.title) },
+                                    icon = { RouterDashIcon(iconIndex, screen.title) },
                                     label = { Text(screen.title, maxLines = 1) },
                                     alwaysShowLabel = false
                                 )
@@ -606,19 +628,19 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                     }
                     if (!isExpandedLayout && showNavigationSheet) {
                         val destinations = listOf(
-                            Screen.OVERVIEW to Icons.Outlined.Dashboard,
-                            Screen.NETWORK to Icons.Outlined.Lan,
-                            Screen.DEVICES to Icons.Outlined.Devices,
-                            Screen.STORAGE to Icons.Outlined.Storage,
-                            Screen.PACKAGES to Icons.Outlined.Inventory2,
-                            Screen.DOWNLOADS to Icons.Outlined.Download,
-                            Screen.SERVICES to Icons.Outlined.MiscellaneousServices,
-                            Screen.VPN to Icons.Outlined.VpnKey,
-                            Screen.FIREWALL to Icons.Outlined.Security,
-                            Screen.SSH to Icons.Outlined.Terminal,
-                            Screen.SYNC to Icons.Outlined.Sync,
-                            Screen.LOGS to Icons.Outlined.Article,
-                            Screen.SETTINGS to Icons.Outlined.Tune
+                            Screen.OVERVIEW to 1,
+                            Screen.NETWORK to 2,
+                            Screen.DEVICES to 3,
+                            Screen.STORAGE to 4,
+                            Screen.PACKAGES to 5,
+                            Screen.DOWNLOADS to 6,
+                            Screen.SERVICES to 7,
+                            Screen.VPN to 8,
+                            Screen.FIREWALL to 9,
+                            Screen.SSH to 10,
+                            Screen.SYNC to 11,
+                            Screen.LOGS to 12,
+                            Screen.SETTINGS to 13
                         )
                         ModalBottomSheet(onDismissRequest = { showNavigationSheet = false },
                             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -627,11 +649,11 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                                 Text("Навигация", style = MaterialTheme.typography.titleLarge,
                                     fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 10.dp))
                                 LazyColumn(Modifier.heightIn(max = 560.dp)) {
-                                    items(destinations) { (screen, icon) ->
+                                    items(destinations) { (screen, iconIndex) ->
                                         NavigationDrawerItem(
                                             label = { Text(screen.title) }, selected = selected == screen,
                                             onClick = { showNavigationSheet = false; selected = screen; refresh(screen) },
-                                            icon = { Icon(icon, contentDescription = null) },
+                                            icon = { RouterDashIcon(iconIndex, null, Modifier.size(40.dp)) },
                                             modifier = Modifier.padding(vertical = 3.dp),
                                             shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp)
                                         )
