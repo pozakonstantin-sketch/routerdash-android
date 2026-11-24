@@ -328,9 +328,9 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                                 client.call("firewall", "status").toString(2)
                             } else Result.success("")
                             val firewallText = buildString {
-                                append("UCI_FIREWALL\\n")
+                                append("UCI_FIREWALL\n")
                                 append(uciResult.getOrElse { "Ошибка чтения UCI firewall: ${it.message}" })
-                                append("\\nNFT_RULESET\\n")
+                                append("\nNFT_RULESET\n")
                                 append(nftResult.getOrElse {
                                     val status = statusResult.getOrNull().orEmpty()
                                     if (status.isNotBlank()) "nft недоступен через file.exec. Статус firewall:\\n$status"
