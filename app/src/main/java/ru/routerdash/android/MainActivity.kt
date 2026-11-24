@@ -333,7 +333,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                                 append("\nNFT_RULESET\n")
                                 append(nftResult.getOrElse {
                                     val status = statusResult.getOrNull().orEmpty()
-                                    if (status.isNotBlank()) "nft недоступен через file.exec. Статус firewall:\\n$status"
+                                    if (status.isNotBlank()) "nft недоступен через file.exec. Статус firewall:\n$status"
                                     else "Ошибка чтения nftables: ${it.message}"
                                 })
                             }
@@ -347,7 +347,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                         Screen.SERVICES -> {
                             // rc.list provides live runtime state; luci.getInitList supplies
                             // the complete init-script inventory and autostart flags.
-                            val rcServices = client.call("rc", "list")
+                            val rcServices = runCatching { client.call("rc", "list") }.getOrDefault(JSONObject())
                             val initServices = runCatching { client.call("luci", "getInitList") }.getOrNull()
                             val mergedServices = JSONObject()
                             val serviceNames = linkedSetOf<String>()
@@ -364,7 +364,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                             snapshot.copy(
                                 services = mergedServices,
                                 processes = runCatching { client.execReadOnly("top", listOf("-bn1")) }.getOrDefault("") +
-                                    "\\n--ROUTERDASH-PS--\\n" +
+                                    "\n--ROUTERDASH-PS--\n" +
                                     runCatching { client.execReadOnly("ps", listOf("-o", "pid,comm,rss")) }.getOrDefault("")
                             )
                         }
