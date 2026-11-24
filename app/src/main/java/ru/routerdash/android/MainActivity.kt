@@ -315,18 +315,59 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                         }
                         Screen.PACKAGES -> snapshot.copy(packages = client.call("rpc-sys", "packagelist"))
                         Screen.DOWNLOADS -> snapshot.copy(downloads = client.aria2Overview())
-                        Screen.FIREWALL -> snapshot.copy(firewallRules = runCatching { client.execReadOnly("sh", listOf("-c", "echo UCI_FIREWALL; uci show firewall 2>/dev/null; echo NFT_RULESET; nft list ruleset 2>/dev/null | head -n 260")) }.getOrDefault("Не удалось прочитать правила firewall"))
+                        Screen.FIREWALL -> {
+                            // Use rpcd UCI API and invoke nft directly. Never pass arbitrary shell
+                            // text to file.exec: a shell executable in a read ACL is a security risk.
+                            val uciResult = runCatching {
+                                client.call("uci", "get", JSONObject().put("config", "firewall")).toString(2)
+                            }
+                            val nftResult = runCatching {
+                                client.execReadOnly("nft", listOf("list", "ruleset"))
+                            }
+                            val statusResult = if (nftResult.isFailure) runCatching {
+                                client.call("firewall", "status").toString(2)
+                            } else Result.success("")
+                            val firewallText = buildString {
+                                append("UCI_FIREWALL\\n")
+                                append(uciResult.getOrElse { "Ошибка чтения UCI firewall: ${it.message}" })
+                                append("\\nNFT_RULESET\\n")
+                                append(nftResult.getOrElse {
+                                    val status = statusResult.getOrNull().orEmpty()
+                                    if (status.isNotBlank()) "nft недоступен через file.exec. Статус firewall:\\n$status"
+                                    else "Ошибка чтения nftables: ${it.message}"
+                                })
+                            }
+                            snapshot.copy(firewallRules = firewallText)
+                        }
                         Screen.VPN -> snapshot.copy(vpnStatus = client.execReadOnly("sh", listOf("-c",
                             "echo VPN_PROCESSES; ps | grep -E \"tailscale|sing-box|xray|openvpn|wireguard\" | grep -v grep; " +
                             "echo TAILSCALE_STATUS; if command -v tailscale >/dev/null 2>&1; then tailscale status 2>&1 | head -n 30; echo TAILSCALE_IP; tailscale ip -4 2>&1; fi; echo SING_BOX_VERSION; sing-box version 2>&1 | head -n 2; " +
                             "echo TUNNEL_INTERFACES; ip -o addr 2>/dev/null | grep -E \"tailscale|tun|wg|sing\" || true; " +
                             "echo VPN_PROCESS_STATS; top -bn1 2>/dev/null | head -n 25; echo ROUTES; ip route 2>/dev/null | head -n 15; echo VPN_LOGS; logread 2>/dev/null | grep -iE \"tailscale|sing-box|vless|wireguard|openvpn\" | tail -n 25 || true")))
-                        Screen.SERVICES -> snapshot.copy(
-                            services = client.call("rc", "list"),
-                            processes = runCatching { client.execReadOnly("top", listOf("-bn1")) }.getOrDefault("") +
-                                "\n--ROUTERDASH-PS--\n" +
-                                runCatching { client.execReadOnly("ps", listOf("-o", "pid,comm,rss")) }.getOrDefault("")
-                        )
+                        Screen.SERVICES -> {
+                            // rc.list provides live runtime state; luci.getInitList supplies
+                            // the complete init-script inventory and autostart flags.
+                            val rcServices = client.call("rc", "list")
+                            val initServices = runCatching { client.call("luci", "getInitList") }.getOrNull()
+                            val mergedServices = JSONObject()
+                            val serviceNames = linkedSetOf<String>()
+                            rcServices.keys().forEach { serviceNames += it }
+                            initServices?.keys()?.forEach { serviceNames += it }
+                            serviceNames.forEach { name ->
+                                val merged = JSONObject()
+                                val init = initServices?.optJSONObject(name)
+                                val runtime = rcServices.optJSONObject(name)
+                                init?.keys()?.forEach { key -> merged.put(key, init.opt(key)) }
+                                runtime?.keys()?.forEach { key -> merged.put(key, runtime.opt(key)) }
+                                mergedServices.put(name, merged)
+                            }
+                            snapshot.copy(
+                                services = mergedServices,
+                                processes = runCatching { client.execReadOnly("top", listOf("-bn1")) }.getOrDefault("") +
+                                    "\\n--ROUTERDASH-PS--\\n" +
+                                    runCatching { client.execReadOnly("ps", listOf("-o", "pid,comm,rss")) }.getOrDefault("")
+                            )
+                        }
                         Screen.LOGS -> {
                             val args = JSONObject().put("lines", 300)
                             val failures = mutableListOf<String>()
