@@ -837,7 +837,7 @@ private fun OverviewScreen(s: Snapshot) {
     val used = (total - available).coerceAtLeast(0L)
     val ramPercent = if (total > 0L) (used.toFloat() / total).coerceIn(0f, 1f) else 0f
     val uptime = info?.optLong("uptime")?.let { duration(it) } ?: "—"
-    val load = info?.optJSONArray("load")?.optLong(0)?.let { String.format("%.2f", it / 1000.0) } ?: "—"
+    val load = info?.optJSONArray("load")?.optLong(0)?.let { String.format(java.util.Locale.US, "%.2f", it / 65536.0) } ?: "—"
     val hostname = board?.optString("hostname", "OpenWrt")?.ifBlank { "OpenWrt" } ?: "OpenWrt"
     val model = board?.optString("model", "Маршрутизатор")?.ifBlank { "Маршрутизатор" } ?: "Маршрутизатор"
     val cpu = s.cpuPercent
