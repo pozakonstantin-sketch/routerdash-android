@@ -1949,11 +1949,24 @@ private fun ServicesScreen(result: JSONObject?, processes: String?, diagnostics:
     }
 }
 
+private fun extractTopProcessRows(top: String): List<String> {
+    val lines = top.lines()
+    val headerIndex = lines.indexOfFirst { line ->
+        val normalized = line.uppercase()
+        normalized.contains("PID") && (normalized.contains("%CPU") || normalized.contains("CPU%") ||
+            normalized.contains("%VSZ") || normalized.contains("COMMAND"))
+    }
+    if (headerIndex < 0) return emptyList()
+    return lines.drop(headerIndex + 1).filter { it.trim().matches(Regex("^\\d+\\s+.*")) }
+}
+
 @Composable
 private fun ProcessesScreen(output: String?, onRefresh: () -> Unit) {
     val sections = output.orEmpty().split("\n--ROUTERDASH-PS--\n", limit = 2)
     val top = sections.getOrNull(0).orEmpty().trim()
-    val processRows = sections.getOrNull(1).orEmpty().lineSequence().filter { it.isNotBlank() }.toList()
+    val psRows = sections.getOrNull(1).orEmpty().lineSequence().filter { it.isNotBlank() }.toList()
+    val topRows = remember(top) { extractTopProcessRows(top) }
+    val processRows = if (topRows.isNotEmpty()) topRows else psRows
     var query by rememberSaveable { mutableStateOf("") }
     val filteredRows = remember(processRows, query) {
         processRows.filter { query.isBlank() || it.contains(query, true) }
@@ -1966,8 +1979,8 @@ private fun ProcessesScreen(output: String?, onRefresh: () -> Unit) {
                 Text("Процессы роутера", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, contentDescription = "Обновить процессы") }
             }
-            Text("Снимок top и список процессов ps. Если RPC-команды запрещены ACL роутера, причина будет показана вместо пустого списка.", style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Список берётся из таблицы top, если роутер её возвращает; иначе используется ps. Проценты показываются только если они есть в заголовке top.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         item {
             InfoCard("Загрузка системы · top") {
@@ -1977,12 +1990,14 @@ private fun ProcessesScreen(output: String?, onRefresh: () -> Unit) {
             }
         }
         item {
+            Text(if (topRows.isNotEmpty()) "Процессы · CPU / память из top" else "Процессы · список ps (без метрик CPU/RAM)",
+                style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(),
                 label = { Text("Поиск процесса") }, singleLine = true)
             Text("${filteredRows.size} строк", style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        if (filteredRows.isEmpty()) item { EmptyState("Список процессов пуст или данные недоступны.") }
+        if (filteredRows.isEmpty()) item { EmptyState("Список процессов пуст или данные недоступны. Проверь диагностический текст top выше.") }
         else items(filteredRows) { row ->
             Text(row, Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp),
                 fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
