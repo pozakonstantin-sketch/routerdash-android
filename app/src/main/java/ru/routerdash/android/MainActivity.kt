@@ -197,8 +197,7 @@ private data class Snapshot(
     val board: JSONObject? = null, val info: JSONObject? = null,
     val network: JSONObject? = null, val wireless: JSONObject? = null, val devices: JSONObject? = null,
     val services: JSONObject? = null, val serviceDiagnostics: String? = null, val logs: JSONObject? = null,
-    val storage: JSONArray? = null, val storageError: String? = null,
-    val packages: JSONObject? = null, val downloads: JSONObject? = null,
+    val storage: JSONArray? = null, val storageError: String? = null,    val packages: JSONObject? = null, val downloads: JSONObject? = null,
     val vpnStatus: String? = null, val diskDetails: String? = null, val firewallRules: String? = null,
     val cpuRaw: String? = null, val networkDevices: JSONObject? = null,
     val processes: String? = null, val logsError: String? = null,
@@ -247,7 +246,8 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                             info = runCatching { client.call("system", "info") }.getOrDefault(JSONObject()),
                             loadAverageRaw = runCatching { readUbusFile(client, "/proc/loadavg") }.getOrNull()
                                 ?.takeIf { parseLoadAverage(it) != null }
-                                ?: runCatching { sshSession?.execReadOnly("cat /proc/loadavg") }.getOrNull(),                            temperatureC = readRouterTemperature(client, sshSession),
+                                ?: runCatching { sshSession?.execReadOnly("cat /proc/loadavg") }.getOrNull(),
+                            temperatureC = readRouterTemperature(client, sshSession),
                             cpuRaw = runCatching { readUbusFile(client, "/proc/stat") }.getOrNull()?.takeIf { it.contains("cpu ") }
                                 ?: runCatching { sshSession?.execReadOnly("cat /proc/stat") }.getOrNull()
                                 ?: runCatching { client.execReadOnly("cat", listOf("/proc/stat")) }.getOrNull(),
@@ -397,8 +397,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                                 append("\n\nФИЗИЧЕСКИЕ УСТРОЙСТВА\n"); append(deviceList)
                                 append("\n\nРАЗДЕЛЫ /SYS/BLOCK\n"); append(sysBlock)
                                 append("\n\nDISKSTATS\n"); append(diskStats)
-                                append("\n\nMOUNT\n"); append(mountOutput.ifBlank { "Нет данных" })
-                                append("\n\nDF -H\n"); append(dfHuman)
+                                append("\n\nMOUNT\n"); append(mountOutput.ifBlank { "Нет данных" })                                append("\n\nDF -H\n"); append(dfHuman)
                             }
                             snapshot.copy(storage = mounts, storageError = diagnostic, diskDetails = diskDetails)
                         }
@@ -497,7 +496,8 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                             }
                             val hasEntries = (logs.optJSONArray("log")?.length() ?: 0) > 0
                             snapshot.copy(logs = logs,
-                                logsError = if (hasEntries) null else failures.joinToString("\n").ifBlank { null })                        }
+                                logsError = if (hasEntries) null else failures.joinToString("\n").ifBlank { null })
+                        }
                         Screen.SSH -> snapshot
                         Screen.SYNC -> snapshot
                         Screen.SETTINGS -> snapshot
@@ -596,8 +596,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                 runCatching { sshSession?.readAvailable().orEmpty() }.getOrDefault("")
             }
             if (chunk.isNotEmpty()) sshOutput = (sshOutput + chunk).takeLast(24000)
-            delay(250)
-        }
+            delay(250)        }
     }
 
     LaunchedEffect(connected, selected, refreshIntervalSeconds) {
@@ -746,7 +745,8 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                             sshHostDefault = runCatching { URI(url).host ?: "192.168.1.1" }.getOrDefault("192.168.1.1"),
                             sshUserDefault = username,
                             onOpenSsh = { selected = Screen.SSH },
-                            pickedFolderUri = pickedSyncFolderUri,                            onPickFolder = onPickSyncFolder
+                            pickedFolderUri = pickedSyncFolderUri,
+                            onPickFolder = onPickSyncFolder
                         )
                         Screen.SSH -> SshScreen(
                             host = runCatching { URI(url).host ?: "192.168.1.1" }.getOrDefault("192.168.1.1"),
@@ -795,8 +795,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                         val destinations = listOf(
                             Screen.OVERVIEW to 1,
                             Screen.NETWORK to 2,
-                            Screen.DEVICES to 3,
-                            Screen.STORAGE to 4,
+                            Screen.DEVICES to 3,                            Screen.STORAGE to 4,
                             Screen.PACKAGES to 5,
                             Screen.DOWNLOADS to 6,
                             Screen.SERVICES to 7,
@@ -1194,8 +1193,7 @@ private fun StatusRecommendationsCard(cpuPercent: Int?, ramPercent: Int?, availa
     }
 }
 
-@Composable
-private fun CpuHistoryChart(history: List<Int>) {
+@Composableprivate fun CpuHistoryChart(history: List<Int>) {
     val accent = MaterialTheme.colorScheme.primary
     val grid = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f)
     val label = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1244,4 +1242,1726 @@ private fun NetworkInformationCard(s: Snapshot) {
                 androidx.compose.ui.graphics.Color(0xFFFF9A52), Modifier.weight(1f))
         }
     }
+}
+
+@Composable
+private fun Speedometer(title: String, value: String, progress: Float, accent: androidx.compose.ui.graphics.Color, modifier: Modifier = Modifier) {
+    val trackColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f)
+    val animatedProgress by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = progress.coerceIn(0f, 1f),
+        animationSpec = androidx.compose.animation.core.tween(700),
+        label = "speed-$title"
+    )
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(title, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Box(Modifier.fillMaxWidth().height(78.dp), contentAlignment = Alignment.BottomCenter) {
+            androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+                val stroke = 8.dp.toPx()
+                val diameter = (size.width - stroke).coerceAtLeast(1f)
+                val top = size.height - diameter / 2f - stroke / 2f
+                val arcSize = androidx.compose.ui.geometry.Size(diameter, diameter)
+                val left = (size.width - diameter) / 2f
+                drawArc(trackColor, 180f, 180f, false, androidx.compose.ui.geometry.Offset(left, top), arcSize,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round))
+                drawArc(brush = androidx.compose.ui.graphics.Brush.linearGradient(listOf(accent.copy(alpha = 0.55f), accent)),
+                    startAngle = 180f, sweepAngle = 180f * animatedProgress, useCenter = false,
+                    topLeft = androidx.compose.ui.geometry.Offset(left, top), size = arcSize,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round))
+                val angle = Math.PI * (1.0 + animatedProgress.toDouble())
+                val center = androidx.compose.ui.geometry.Offset(size.width / 2f, size.height - stroke / 2f)
+                val radius = diameter / 2f - stroke
+                val end = androidx.compose.ui.geometry.Offset(center.x + kotlin.math.cos(angle).toFloat() * radius,
+                    center.y + kotlin.math.sin(angle).toFloat() * radius)
+                drawLine(accent, center, end, strokeWidth = 2.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                drawCircle(accent, radius = 3.dp.toPx(), center = center)
+            }
+            Text(value, Modifier.padding(bottom = 1.dp), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+@Composable
+private fun NetworkScreen(result: JSONObject?, wireless: JSONObject?) {
+    val list = result?.optJSONArray("interface")
+    val radios = wireless?.keys()?.asSequence()?.mapNotNull { key -> wireless.optJSONObject(key)?.let { key to it } }?.toList() ?: emptyList()
+    LazyColumn(contentPadding = PaddingValues(vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item { Text("Сетевые интерфейсы", style = MaterialTheme.typography.headlineSmall) }
+        if (radios.isNotEmpty()) {
+            item { Text("Wi-Fi", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
+            items(radios) { (radioName, radio) ->
+                InfoCard(radioName) {
+                    InfoLine("Состояние", if (radio.optBoolean("up")) "Включён" else "Выключен")
+                    InfoLine("Канал", radio.optJSONObject("config")?.optString("channel", "—") ?: "—")
+                    val interfaces = radio.optJSONArray("interfaces")
+                    if (interfaces != null) {
+                        for (idx in 0 until interfaces.length()) {
+                            val iface = interfaces.optJSONObject(idx) ?: JSONObject()
+                            val cfg = iface.optJSONObject("config") ?: JSONObject()
+                            val iw = iface.optJSONObject("iwinfo") ?: JSONObject()
+                            InfoLine("SSID", cfg.optString("ssid", "—"))
+                            InfoLine("Интерфейс", iface.optString("ifname", "—"))
+                            InfoLine("Сигнал", if (iw.has("signal")) "${iw.optInt("signal")} dBm" else "—")
+                            InfoLine("Шифрование", cfg.optString("encryption", "—"))
+                            val stations = iface.optJSONArray("associations")
+                            Text("Подключённые клиенты · ${stations?.length() ?: 0}",
+                                style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                            if (stations != null && stations.length() > 0) {
+                                for (stationIndex in 0 until stations.length()) {
+                                    val station = stations.optJSONObject(stationIndex) ?: JSONObject()
+                                    val mac = station.optString("mac", "—")
+                                    val signal = if (station.has("signal")) "${station.optInt("signal")} dBm" else "сигнал неизвестен"
+                                    val connectedSeconds = station.optLong("connected_time", -1L)
+                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically) {
+                                        Column(Modifier.weight(1f)) {
+                                            Text(mac, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+                                            Text(signal + if (connectedSeconds >= 0) " · ${duration(connectedSeconds)}" else "",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                        Text(formatBytes(station.optJSONObject("rx")?.optLong("bytes") ?: 0L) + " ↓",
+                                            style = MaterialTheme.typography.labelSmall)
+                                    }
+                                }
+                            } else {
+                                Text(if (iface.has("association_error")) "Список клиентов недоступен: ${iface.optString("association_error")}" else "Нет подключённых клиентов",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (list == null || list.length() == 0) item { EmptyState("Нет данных о сетевых интерфейсах") }
+        else items((0 until list.length()).map { list.optJSONObject(it) ?: JSONObject() }) { entry ->
+            InfoCard(entry.optString("interface", "Интерфейс")) {
+                InfoLine("Состояние", if (entry.optBoolean("up")) "Подключён" else "Не подключён")
+                InfoLine("Протокол", entry.optString("proto", "—"))
+                InfoLine("Устройство", entry.optString("device", "—"))
+                val ip = entry.optJSONArray("ipv4-address")?.optJSONObject(0)?.optString("address", "—") ?: "—"
+                InfoLine("IPv4", ip)
+            }
+        }
+    }
+}
+
+@Composable
+private fun DevicesScreen(result: JSONObject?, wireless: JSONObject?) {
+    val leases = result?.optJSONArray("dhcp_leases")
+    val arp = result?.optJSONArray("arp_entries")
+    data class Device(
+        val ip: String, val mac: String, val hostname: String, val source: String,
+        val expires: String, val signal: String = "", val connected: String = ""
+    )
+    val devices = remember(result, wireless) {
+        val merged = linkedMapOf<String, Device>()
+        if (leases != null) for (i in 0 until leases.length()) {
+            val item = leases.optJSONObject(i) ?: continue
+            val mac = item.optString("macaddr").uppercase()
+            val ip = item.optString("ipaddr")
+            val key = mac.ifBlank { ip }
+            if (key.isNotBlank()) merged[key] = Device(ip, mac, item.optString("hostname", "Без имени"), "DHCP", item.optString("expires", "—"))
+        }
+        if (arp != null) for (i in 0 until arp.length()) {
+            val item = arp.optJSONObject(i) ?: continue
+            val mac = item.optString("macaddr").uppercase()
+            val ip = item.optString("ipaddr")
+            val key = mac.ifBlank { ip }
+            if (key.isNotBlank() && !merged.containsKey(key))
+                merged[key] = Device(ip, mac, "Неизвестное устройство", "ARP", "—")
+        }
+        wireless?.keys()?.asSequence()?.forEach { radioKey ->
+            val radio = wireless.optJSONObject(radioKey) ?: return@forEach
+            val interfaces = radio.optJSONArray("interfaces") ?: return@forEach
+            for (interfaceIndex in 0 until interfaces.length()) {
+                val iface = interfaces.optJSONObject(interfaceIndex) ?: continue
+                val stations = iface.optJSONArray("associations") ?: continue
+                for (stationIndex in 0 until stations.length()) {
+                    val station = stations.optJSONObject(stationIndex) ?: continue
+                    val mac = station.optString("mac").uppercase()
+                    if (mac.isBlank()) continue
+                    val existing = merged[mac]
+                    val signal = if (station.has("signal")) "${station.optInt("signal")} dBm" else ""
+                    val connectedSeconds = station.optLong("connected_time", -1L)
+                    val connected = if (connectedSeconds >= 0L) duration(connectedSeconds) else ""
+                    merged[mac] = if (existing != null) existing.copy(
+                        source = (existing.source.split(" · ") + "Wi-Fi").distinct().joinToString(" · "),
+                        signal = signal, connected = connected
+                    ) else Device("", mac, "Wi-Fi клиент", "Wi-Fi", "—", signal, connected)
+                }
+            }
+        }
+        merged.values.sortedWith(compareBy<Device> {
+            it.hostname == "Неизвестное устройство" || it.hostname == "Wi-Fi клиент"        }.thenBy { it.hostname })
+    }
+    LazyColumn(contentPadding = PaddingValues(vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+        item {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Устройства", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                Surface(color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.14f), shape = MaterialTheme.shapes.small) {
+                    Text("${devices.size} в сети", Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+            Text("DHCP, ARP и подключённые Wi-Fi-клиенты объединены по MAC-адресу.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (result == null) item { EmptyState("Не удалось получить список устройств.") }
+        else if (devices.isEmpty()) item { EmptyState("Активных DHCP-, ARP- и Wi-Fi-записей нет.") }
+        else items(devices, key = { it.mac.ifBlank { it.ip } }) { device ->
+            InfoCard(device.hostname) {
+                InfoLine("IP-адрес", device.ip.ifBlank { "—" })
+                InfoLine("MAC-адрес", device.mac.ifBlank { "—" })
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(device.source, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
+                    if (device.expires != "—") Text("Аренда: ${device.expires}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
+                }
+                if (device.signal.isNotBlank()) InfoLine("Wi-Fi сигнал", device.signal)
+                if (device.connected.isNotBlank()) InfoLine("В сети", device.connected)
+            }
+        }
+    }
+}
+@Composable
+private fun StorageScreen(mounts: JSONArray?, loadError: String?, diskDetails: String?, onRefresh: () -> Unit) {
+    data class Mount(val path: String, val device: String, val size: Long, val available: Long) {
+        val used: Long get() = (size - available).coerceAtLeast(0L)
+        val percent: Int get() = if (size > 0L) ((used * 100L) / size).toInt().coerceIn(0, 100) else 0
+    }
+    val entries = remember(mounts) {
+        if (mounts == null) emptyList() else (0 until mounts.length()).mapNotNull { index ->
+            val item = mounts.optJSONObject(index) ?: return@mapNotNull null
+            val size = item.optLong("size", item.optLong("total", item.optLong("total_bytes", 0L))).coerceAtLeast(0L)
+            val available = item.optLong("avail", item.optLong("available", item.optLong("free", 0L))).coerceIn(0L, size)
+            Mount(item.optString("mount", item.optString("mountpoint", item.optString("target", "—"))),
+                item.optString("device", item.optString("fs", item.optString("source", "—"))), size, available)
+        }.filter { it.path != "—" }.distinctBy { it.path }.sortedBy { it.path }
+    }
+    LazyColumn(contentPadding = PaddingValues(vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Хранилища роутера", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, contentDescription = "Обновить") }
+            }
+            Text("Использование файловых систем, разделов и подключённых накопителей.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        item {
+            InfoCard("Физические диски · разделы · точки монтирования") {
+                Text(diskDetails ?: "Диагностика ещё не получена.",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+            }
+        }
+        if (!loadError.isNullOrBlank()) item {
+            InfoCard("Диагностика получения данных") {
+                Text(loadError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                OutlinedButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, null); Spacer(Modifier.width(6.dp)); Text("Повторить") }
+            }
+        }
+        if (mounts == null) item { EmptyState("Нет данных о файловых системах.") }
+        else if (entries.isEmpty()) item { EmptyState("Роутер не вернул смонтированные файловые системы.") }
+        else items(entries, key = { it.path + it.device }) { mount ->
+            val barColor = when {
+                mount.percent >= 90 -> MaterialTheme.colorScheme.error
+                mount.percent >= 75 -> MaterialTheme.colorScheme.tertiary
+                else -> MaterialTheme.colorScheme.primary
+            }
+            InfoCard(mount.path) {
+                InfoLine("Устройство", mount.device)
+                if (mount.size > 0L) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Занято", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("${formatBytes(mount.used)} · ${mount.percent}%", fontWeight = FontWeight.SemiBold)
+                    }
+                    LinearProgressIndicator(progress = { mount.percent / 100f }, modifier = Modifier.fillMaxWidth(), color = barColor)
+                    InfoLine("Свободно", formatBytes(mount.available))
+                    InfoLine("Всего", formatBytes(mount.size))
+                } else {
+                    Text("Точка монтирования обнаружена, статистика объёма недоступна.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+    }
+}
+
+private fun findArray(root: JSONObject?, keys: List<String>): JSONArray {
+    if (root == null) return JSONArray()
+    keys.forEach { key -> root.optJSONArray(key)?.let { return it } }
+    root.keys().asSequence().forEach { key ->
+        val nested = root.optJSONObject(key)
+        keys.forEach { name -> nested?.optJSONArray(name)?.let { return it } }
+    }
+    return JSONArray()
+}
+
+private fun findArrayDeep(root: Any?, keys: List<String>, depth: Int = 0): JSONArray {
+    if (depth > 8 || root == null) return JSONArray()
+    if (root is JSONArray) return root
+    if (root is JSONObject) {
+        keys.forEach { key -> root.optJSONArray(key)?.let { return it } }
+        val iterator = root.keys()
+        while (iterator.hasNext()) {
+            val value = root.opt(iterator.next())
+            val found = findArrayDeep(value, keys, depth + 1)
+            if (found.length() > 0) return found
+        }
+    }
+    return JSONArray()
+}
+
+private fun normalizeMounts(source: JSONArray): JSONArray {
+    val normalized = JSONArray()
+    for (index in 0 until source.length()) {
+        val item = source.optJSONObject(index) ?: continue
+        val device = item.optString("device", item.optString("fs",
+            item.optString("source", item.optString("filesystem", "—"))))
+        val mount = item.optString("mount", item.optString("mountpoint",
+            item.optString("target", item.optString("path", ""))))
+        if (mount.isBlank()) continue
+        val blockSize = item.optLong("block_size", item.optLong("bsize", item.optLong("frsize", 0L)))
+        val blocks = item.optLong("blocks", item.optLong("total_blocks", 0L))
+        val rawSize = item.optLong("size", item.optLong("total", item.optLong("total_bytes", 0L)))
+        val size = if (rawSize > 0L) rawSize else if (blockSize > 0L && blocks > 0L) blockSize * blocks else 0L
+        val rawUsed = item.optLong("used", item.optLong("used_bytes", -1L))
+        val rawAvailable = item.optLong("avail", item.optLong("available",
+            item.optLong("free", item.optLong("free_bytes", -1L))))
+        val used = if (rawUsed >= 0L) rawUsed else if (size > 0L && rawAvailable >= 0L) (size - rawAvailable).coerceAtLeast(0L) else 0L
+        val available = if (rawAvailable >= 0L) rawAvailable else (size - used).coerceAtLeast(0L)
+        normalized.put(JSONObject().put("device", device).put("mount", mount)
+            .put("size", size).put("used", used).put("avail", available))
+    }
+    return normalized
+}
+
+private fun parseDfOutput(output: String): JSONArray {
+    val rows = JSONArray()
+    output.lineSequence().drop(1).forEach { raw ->
+        val parts = raw.trim().split(Regex("\\s+"))
+        if (parts.size < 6) return@forEach
+        val blockSize = parts[1].toLongOrNull() ?: return@forEach
+        val used = parts[2].toLongOrNull() ?: return@forEach
+        val available = parts[3].toLongOrNull() ?: return@forEach
+        rows.put(JSONObject().put("device", parts[0]).put("mount", parts.last())
+            .put("size", blockSize * 1024L).put("used", used * 1024L)
+            .put("avail", available * 1024L))
+    }
+    return rows
+}
+
+private fun parseMountCommandOutput(output: String): JSONArray {
+    val rows = JSONArray()
+    val seen = mutableSetOf<String>()
+    output.lineSequence().forEach { line ->
+        val match = Regex("^(.+?) on (.+?) type ").find(line.trim()) ?: return@forEach
+        val device = match.groupValues[1].trim()
+        val mount = match.groupValues[2].trim()
+        if (mount.startsWith("/") && seen.add(mount)) {
+            rows.put(JSONObject().put("device", device).put("mount", mount)
+                .put("size", 0L).put("used", 0L).put("avail", 0L))
+        }
+    }
+    return rows
+}
+
+private fun parseProcMounts(output: String): JSONArray {
+    val rows = JSONArray()
+    val seen = mutableSetOf<String>()
+    output.lineSequence().forEach { line ->
+        val parts = line.trim().split(Regex("\\s+"))
+        if (parts.size >= 3) {
+            val mount = parts[1].replace("\\040", " ")
+            if (mount.startsWith("/") && seen.add(mount)) {
+                rows.put(JSONObject().put("device", parts[0]).put("mount", mount)
+                    .put("size", 0).put("used", 0).put("avail", 0))
+            }
+        }
+    }
+    return rows
+}
+
+private fun normalizeLogResponse(response: JSONObject): JSONObject {
+    val source = findArrayDeep(response, listOf("log", "entries", "lines", "messages", "data"))
+    val entries = normalizeLogRows(source)
+    if (entries.length() > 0) return JSONObject().put("log", entries)
+    val text = response.optString("data", response.optString("output", ""))
+    if (text.isNotBlank()) return parseLogReadOutput(text)
+    return JSONObject().put("log", entries)
+}
+private fun normalizeLogRows(source: JSONArray): JSONArray {
+    val entries = JSONArray()
+    for (index in 0 until source.length()) {
+        when (val row = source.opt(index)) {
+            is JSONObject -> entries.put(row)
+            is String -> entries.put(parseLogLine(row))
+        }
+    }
+    return entries
+}
+
+private fun parseLogReadOutput(output: String): JSONObject {
+    val entries = JSONArray()
+    output.lineSequence().filter { it.isNotBlank() }.forEach { entries.put(parseLogLine(it)) }
+    return JSONObject().put("log", entries)
+}
+
+private fun parseLogLine(line: String): JSONObject {
+    val priority = when {
+        line.contains(" error", true) || line.contains(" failed", true) || line.contains(" denied", true) -> "error"
+        line.contains(" warn", true) -> "warning"
+        else -> "info"
+    }
+    val timestamp = Regex("^(\\w{3}\\s+\\d+\\s+[\\d:]+)").find(line)?.value.orEmpty()
+    return JSONObject().put("msg", line).put("time", timestamp).put("priority", priority)
+}
+
+private fun serviceDescription(name: String): String {
+    val descriptions = mapOf(
+        "dnsmasq" to "Локальный DNS и DHCP: выдаёт IP-адреса устройствам и разрешает доменные имена.",
+        "odhcpd" to "Объявления IPv6, DHCPv6 и Router Advertisement в локальной сети.",
+        "netifd" to "Управляет сетевыми интерфейсами, WAN/LAN-подключениями и адресацией.",
+        "firewall" to "Межсетевой экран: фильтрует входящий, исходящий и транзитный трафик.",
+        "firewall4" to "Применяет правила межсетевого экрана на базе nftables.",
+        "dropbear" to "SSH-сервер для защищённого удалённого доступа к роутеру.",
+        "uhttpd" to "Встроенный HTTP/HTTPS-сервер, через который работает LuCI.",
+        "rpcd" to "Предоставляет RPC/ubus-доступ к функциям OpenWrt и LuCI.",
+        "log" to "Системный журнал: принимает и хранит сообщения служб и ядра.",
+        "cron" to "Планировщик периодических задач по расписанию.",
+        "sysntpd" to "Синхронизирует системное время по NTP.",
+        "tailscale" to "Защищённая mesh-VPN сеть для удалённого доступа без публичного IP.",
+        "sing-box" to "Прокси и маршрутизация трафика: VLESS, Shadowsocks и другие протоколы.",
+        "aria2" to "Фоновый менеджер загрузок HTTP/FTP/BitTorrent.",
+        "smbd" to "Общий доступ к файлам и папкам по протоколу SMB для ПК и телевизоров.",
+        "wsdd2" to "Обнаружение SMB-устройств в локальной сети Windows.",
+        "collectd" to "Собирает системные метрики CPU, памяти, дисков и сети.",
+        "irqbalance" to "Распределяет аппаратные прерывания между ядрами процессора."
+    )
+    return descriptions[name] ?: when {
+        name.startsWith("luci") -> "Компонент веб-интерфейса LuCI: предоставляет страницу или функцию управления роутером."
+        name.startsWith("ppp") -> "Обслуживает PPP/PPPoE-подключение к провайдеру."
+        name.startsWith("wpa") || name.startsWith("hostapd") -> "Управляет Wi-Fi точками доступа и аутентификацией беспроводных клиентов."
+        name.startsWith("ntp") -> "Синхронизация системного времени."
+        else -> "Системная служба OpenWrt. Назначение зависит от установленного пакета и конфигурации."
+    }
+}
+
+private fun processUsage(output: String?, service: String): Pair<String, String>? {
+    if (output.isNullOrBlank()) return null
+    val sections = output.split("\n--ROUTERDASH-PS--\n", limit = 2)
+    val topLines = sections.first().lines()
+    val header = topLines.firstOrNull { it.contains("PID") && it.contains("%CPU") }
+    var cpuValue = "—"
+    if (header != null) {
+        val columns = header.trim().split(Regex("\\s+"))
+        val cpuIndex = columns.indexOfFirst { it.equals("%CPU", true) || it.equals("CPU%", true) }
+        val row = topLines.dropWhile { it != header }.drop(1)
+            .firstOrNull { it.contains(service, true) }
+        if (cpuIndex >= 0 && row != null) cpuValue = row.trim().split(Regex("\\s+")).getOrNull(cpuIndex) ?: "—"
+    }
+    var rssKb = 0L
+    if (sections.size > 1) {
+        val psLines = sections[1].lines()
+        val psHeader = psLines.firstOrNull { it.contains("PID", true) && it.contains("RSS", true) }
+        if (psHeader != null) {
+            val columns = psHeader.trim().split(Regex("\\s+"))
+            val rssIndex = columns.indexOfFirst { it.equals("RSS", true) }
+            psLines.dropWhile { it != psHeader }.drop(1).forEach { row ->
+                val fields = row.trim().split(Regex("\\s+"))
+                val processName = fields.drop(1).dropLast(1).joinToString(" ")
+                if (processName.contains(service, true)) {
+                    rssKb += fields.getOrNull(rssIndex)?.toLongOrNull() ?: 0L
+                }
+            }
+        }
+    }
+    val memoryValue = if (rssKb > 0L) formatBytes(rssKb * 1024L) else "Нет данных"
+    return cpuValue to memoryValue
+}
+private fun packageDescription(name: String): String {
+    val exact = mapOf(
+        "adblock" to "Блокировка рекламы и трекеров на уровне DNS.",
+        "aria2" to "Многопоточный загрузчик файлов по HTTP, HTTPS, FTP и BitTorrent.",
+        "block-mount" to "Автоматическое подключение внешних накопителей.",
+        "ca-bundle" to "Набор доверенных корневых сертификатов для HTTPS.",
+        "curl" to "Утилита для HTTP-запросов и загрузки данных из сети.",
+        "dnsmasq" to "Локальный DNS-сервер и DHCP для домашних устройств.",
+        "dropbear" to "Лёгкий SSH-сервер для удалённого доступа к роутеру.",
+        "firewall4" to "Межсетевой экран OpenWrt на базе nftables.",
+        "htop" to "Интерактивный просмотр процессов и нагрузки системы.",
+        "iperf3" to "Измерение пропускной способности сети.",
+        "kmod-usb-storage" to "Драйвер поддержки USB-накопителей.",
+        "luci" to "Веб-интерфейс управления OpenWrt.",
+        "luci-app-aria2" to "Страница настройки и управления загрузчиком aria2 в LuCI.",
+        "luci-app-firewall" to "Управление правилами межсетевого экрана через LuCI.",
+        "luci-app-opkg" to "Управление пакетами через веб-интерфейс LuCI.",
+        "luci-app-sqm" to "Настройка SQM для уменьшения задержек и bufferbloat.",
+        "luci-app-ttyd" to "Доступ к терминалу роутера из браузера.",
+        "luci-proto-wireguard" to "Поддержка настройки WireGuard в LuCI.",
+        "luci-theme-argon" to "Тема оформления веб-интерфейса LuCI.",
+        "nano" to "Простой текстовый редактор в терминале.",
+        "openssh-sftp-server" to "Поддержка передачи файлов по SFTP через SSH.",
+        "rpcd" to "Служба RPC, предоставляющая системные функции через ubus.",
+        "samba4-server" to "Общий доступ к файлам по SMB/CIFS для Windows и телевизоров.",
+        "sing-box" to "Универсальный сетевой прокси-клиент и маршрутизатор трафика.",
+        "tailscale" to "Защищённая mesh-VPN сеть для доступа к устройствам без белого IP.",
+        "tcpdump" to "Захват и анализ сетевых пакетов.",
+        "wget-ssl" to "Загрузка файлов по HTTP и HTTPS из командной строки.",
+        "wireguard-tools" to "Утилиты настройки и управления VPN WireGuard.",
+        "wpad" to "Компонент Wi-Fi с поддержкой WPA/WPA2/WPA3."
+    )
+    exact[name]?.let { return it }
+    return when {
+        name.startsWith("luci-i18n-") -> "Русский или другой языковой перевод для соответствующего приложения LuCI."
+        name.startsWith("luci-app-") -> "Дополнительная страница или функция управления OpenWrt в веб-интерфейсе LuCI."
+        name.startsWith("luci-proto-") -> "Поддержка настройки сетевого протокола в интерфейсе LuCI."
+        name.startsWith("luci-") -> "Компонент веб-интерфейса LuCI: страницы, библиотеки или системная интеграция."
+        name.startsWith("kmod-") -> "Модуль ядра Linux: драйвер или поддержка соответствующего оборудования и функции."
+        name.startsWith("lib") -> "Программная библиотека, от которой зависят другие приложения и системные службы."
+        name.startsWith("odhcp") -> "Компонент DHCPv4/DHCPv6 и IPv6-автоконфигурации сети."
+        name.startsWith("ppp") -> "Компонент протокола PPP для соответствующих WAN-подключений."
+        name.startsWith("iptables") || name.startsWith("nftables") -> "Инструменты фильтрации сетевого трафика и настройки firewall."
+        name.startsWith("dns") -> "Компонент разрешения DNS-имён и сетевой службы."
+        name.startsWith("busybox") -> "Набор базовых Unix-утилит для командной строки OpenWrt."
+        name.startsWith("base-") || name in listOf("procd", "netifd", "uci", "ubus", "ubox", "fstools") ->
+            "Базовый системный компонент OpenWrt; обеспечивает работу и настройку роутера."
+        else -> "Системный пакет OpenWrt. Точное назначение зависит от компонента; название можно использовать для поиска документации."
+    }
+}
+
+@Composable
+private fun PackagesScreen(result: JSONObject?, onRefresh: () -> Unit) {
+    var filter by rememberSaveable { mutableStateOf("") }
+    var expandedPackage by rememberSaveable { mutableStateOf("") }
+    val packages = remember(result) {
+        val map = result?.optJSONObject("packages") ?: JSONObject()
+        map.keys().asSequence().map { name -> name to map.optString(name) }.sortedBy { it.first }.toList()
+    }
+    val filtered = remember(packages, filter) {
+        packages.filter { (name, version) ->
+            filter.isBlank() || name.contains(filter, true) || packageDescription(name).contains(filter, true) ||
+                version.contains(filter, true)
+        }
+    }
+    LazyColumn(contentPadding = PaddingValues(vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("Установленные пакеты", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, contentDescription = "Обновить") }
+            }
+            Text("${filtered.size} из ${packages.size} пакетов · нажми на пакет, чтобы раскрыть описание",
+                color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+            OutlinedTextField(filter, { filter = it }, Modifier.fillMaxWidth(),
+                label = { Text("Поиск по названию и назначению") }, singleLine = true)
+        }
+        if (result == null) item { EmptyState("Не удалось получить список пакетов. Проверь доступ rpc-sys.packagelist.") }
+        else if (filtered.isEmpty()) item { EmptyState("Пакеты не найдены.") }
+        else items(filtered, key = { it.first }) { (name, version) ->
+            ElevatedCard(onClick = { expandedPackage = if (expandedPackage == name) "" else name }, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text(name, Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+                        Icon(if (expandedPackage == name) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                            contentDescription = if (expandedPackage == name) "Свернуть" else "Описание")
+                    }
+                    Text("Версия: ${version.ifBlank { "—" }}", style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (expandedPackage == name) Text(packageDescription(name), style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.secondary)
+                    else Text(packageDescription(name), maxLines = 2, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloadsScreen(result: JSONObject?, api: RouterApi?, onRefresh: () -> Unit) {
+    var uri by rememberSaveable { mutableStateOf("") }
+    var adding by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    val global = result?.optJSONObject("global")
+    val tasks = remember(result) {
+        val rows = mutableListOf<Pair<String, JSONObject>>()
+        listOf("active", "waiting", "stopped").forEach { key ->
+            val array = result?.optJSONArray(key) ?: return@forEach
+            for (i in 0 until array.length()) {                val task = array.optJSONObject(i) ?: continue
+                rows += (if (key == "active") "active" else if (key == "waiting") "waiting" else task.optString("status", "stopped")) to task
+            }
+        }
+        rows
+    }
+    LazyColumn(contentPadding = PaddingValues(vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("Загрузки aria2", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, contentDescription = "Обновить") }
+            }
+            if (global != null) {
+                InfoCard("Состояние загрузчика") {
+                    InfoLine("Загружается", formatRate(global.optString("downloadSpeed").toLongOrNull() ?: 0L))
+                    InfoLine("Отдаётся", formatRate(global.optString("uploadSpeed").toLongOrNull() ?: 0L))
+                    InfoLine("Активные", global.optString("numActive", "0"))
+                    InfoLine("В очереди", global.optString("numWaiting", "0"))
+                    InfoLine("Остановлены", global.optString("numStopped", "0"))
+                }
+            }
+            InfoCard("Добавить загрузку") {
+                OutlinedTextField(uri, { uri = it }, Modifier.fillMaxWidth(),
+                    label = { Text("HTTP(S), FTP или magnet-ссылка") }, singleLine = true)
+                Button(
+                    enabled = uri.isNotBlank() && !adding && api != null,
+                    onClick = {
+                        val target = uri.trim()
+                        adding = true
+                        message = null
+                        scope.launch {
+                            try {
+                                withContext(Dispatchers.IO) { api?.aria2AddUri(target) }
+                                uri = ""
+                                message = "Загрузка добавлена."
+                                onRefresh()
+                            } catch (e: Exception) { message = e.message ?: "Не удалось добавить загрузку" }
+                            finally { adding = false }
+                        }
+                    }
+                ) {
+                    if (adding) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    else Icon(Icons.Outlined.Download, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Добавить")
+                }
+                message?.let { Text(it, color = MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.bodySmall) }
+            }
+        }
+        if (result == null) item { EmptyState("aria2 недоступен. Проверь, что служба запущена и JSON-RPC доступен на порту 6800.") }
+        else if (tasks.isEmpty()) item { EmptyState("Активных и завершённых загрузок нет.") }
+        else items(tasks, key = { it.second.optString("gid") }) { (status, task) ->
+            val total = task.optString("totalLength").toLongOrNull() ?: 0L
+            val done = task.optString("completedLength").toLongOrNull() ?: 0L
+            val percent = if (total > 0L) (done * 100L / total).toInt().coerceIn(0, 100) else if (status == "complete") 100 else 0
+            val files = task.optJSONArray("files")
+            val file = files?.optJSONObject(0)
+            val name = file?.optString("path")?.takeIf { !it.isNullOrBlank() }
+                ?: task.optString("bittorrent", "").ifBlank { task.optString("gid", "Загрузка") }
+            InfoCard(name.substringAfterLast('/')) {
+                InfoLine("Состояние", status)
+                LinearProgressIndicator(progress = { percent / 100f }, Modifier.fillMaxWidth())
+                InfoLine("Прогресс", "$percent% · ${formatBytes(done)} / ${formatBytes(total)}")
+                if (status == "active") InfoLine("Скорость", formatRate(task.optString("downloadSpeed").toLongOrNull() ?: 0L))
+                if (task.optString("errorMessage").isNotBlank()) Text(task.optString("errorMessage"),
+                    color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ServicesScreen(result: JSONObject?, processes: String?, diagnostics: String?, api: RouterApi?, onRefresh: () -> Unit) {
+    val names = result?.keys()?.asSequence()?.toList()?.sorted() ?: emptyList()
+    val scope = rememberCoroutineScope()
+    var busyService by remember { mutableStateOf<String?>(null) }
+    var message by remember { mutableStateOf<String?>(null) }
+    var pendingAction by remember { mutableStateOf<Pair<String, String>?>(null) }
+
+    pendingAction?.let { (name, action) ->
+        val verb = when (action) { "start" -> "запустить"; "stop" -> "остановить"; else -> "перезапустить" }
+        AlertDialog(
+            onDismissRequest = { pendingAction = null },
+            title = { Text("Управление службой") },
+            text = { Text("Действительно $verb службу «$name»?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingAction = null
+                    scope.launch {
+                        busyService = name
+                        message = null
+                        try {
+                            withContext(Dispatchers.IO) {
+                                checkNotNull(api) { "Нет подключения к роутеру" }
+                                    .call("rc", "init", JSONObject().put("name", name).put("action", action))
+                            }
+                            message = "Команда отправлена: $name · $action"
+                            delay(900)
+                            onRefresh()
+                        } catch (e: Exception) {
+                            message = "Не удалось выполнить $action для $name: ${e.message}"
+                        } finally { busyService = null }
+                    }
+                }) { Text("Выполнить") }
+            },
+            dismissButton = { TextButton(onClick = { pendingAction = null }) { Text("Отмена") } }
+        )
+    }
+
+    LazyColumn(contentPadding = PaddingValues(vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Службы OpenWrt", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                IconButton(onClick = onRefresh, enabled = busyService == null) {
+                    Icon(Icons.Outlined.Refresh, contentDescription = "Обновить список")
+                }
+            }
+            Text("${names.size} служб получено", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (message != null) Text(message!!, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 6.dp))
+        }
+        if (!diagnostics.isNullOrBlank()) item {
+            InfoCard("Неполный список служб") {
+                Text(diagnostics, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        if (names.isEmpty()) item { EmptyState("Нет данных о службах. Проверь доступ к ubus rc.list и file.exec.") }
+        else items(names) { name ->
+            val service = result?.optJSONObject(name) ?: JSONObject()
+            val hasRuntimeState = service.has("running")
+            val running = service.optBoolean("running")
+            InfoCard(name) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text("Состояние", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if (!hasRuntimeState) "Неизвестно" else if (running) "Работает" else "Остановлена",
+                        color = if (running) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = FontWeight.SemiBold)
+                }
+                InfoLine("Автозапуск", if (service.optBoolean("enabled")) "Включён" else "Выключен")
+                Text(serviceDescription(name), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                val usage = processUsage(processes, name)
+                InfoLine("CPU процесса", usage?.first?.let { "$it%" } ?: "Нет данных")
+                InfoLine("ОЗУ процесса (RSS)", usage?.second ?: "Нет данных")
+                if (hasRuntimeState) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { pendingAction = name to "start" },
+                            enabled = busyService == null && !running, modifier = Modifier.weight(1f)) {
+                            Text("Запустить")
+                        }
+                        OutlinedButton(onClick = { pendingAction = name to "stop" },
+                            enabled = busyService == null && running, modifier = Modifier.weight(1f)) {
+                            Text("Остановить")
+                        }
+                        OutlinedButton(onClick = { pendingAction = name to "restart" },
+                            enabled = busyService == null && running, modifier = Modifier.weight(1f)) {
+                            Text("Перезапуск")
+                        }
+                    }
+                } else {
+                    Text("Управление недоступно: rc.list не сообщил состояние процесса.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                }
+                if (busyService == name) LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+        }
+    }
+}
+
+private fun extractTopProcessRows(top: String): List<String> {
+    val lines = top.lines()
+    val headerIndex = lines.indexOfFirst { line ->
+        val normalized = line.uppercase()
+        normalized.contains("PID") && (normalized.contains("%CPU") || normalized.contains("CPU%") ||
+            normalized.contains("%VSZ") || normalized.contains("COMMAND"))
+    }
+    if (headerIndex < 0) return emptyList()
+    return lines.drop(headerIndex + 1).filter { it.trim().matches(Regex("^\\d+\\s+.*")) }
+}
+
+@Composable
+private fun ProcessesScreen(output: String?, onRefresh: () -> Unit) {
+    val sections = output.orEmpty().split("\n--ROUTERDASH-PS--\n", limit = 2)
+    val top = sections.getOrNull(0).orEmpty().trim()
+    val psRows = sections.getOrNull(1).orEmpty().lineSequence().filter { it.isNotBlank() }.toList()
+    val topRows = remember(top) { extractTopProcessRows(top) }
+    val processRows = if (topRows.isNotEmpty()) topRows else psRows
+    var query by rememberSaveable { mutableStateOf("") }
+    val filteredRows = remember(processRows, query) {
+        processRows.filter { query.isBlank() || it.contains(query, true) }
+    }
+    LazyColumn(contentPadding = PaddingValues(vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically) {
+                Text("Процессы роутера", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, contentDescription = "Обновить процессы") }            }
+            Text("Список берётся из таблицы top, если роутер её возвращает; иначе используется ps. Проценты показываются только если они есть в заголовке top.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        item {
+            InfoCard("Загрузка системы · top") {
+                Text(top.ifBlank { "Нет данных top. Нажми «Обновить» или проверь доступ file.exec." },
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        item {
+            Text(if (topRows.isNotEmpty()) "Процессы · CPU / память из top" else "Процессы · список ps (без метрик CPU/RAM)",
+                style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(),
+                label = { Text("Поиск процесса") }, singleLine = true)
+            Text("${filteredRows.size} строк", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (filteredRows.isEmpty()) item { EmptyState("Список процессов пуст или данные недоступны. Проверь диагностический текст top выше.") }
+        else items(filteredRows) { row ->
+            Text(row, Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp),
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
+private fun LogsScreen(result: JSONObject?, loadError: String?) {
+    val list = result?.optJSONArray("log") ?: result?.optJSONArray("entries")
+    var query by rememberSaveable { mutableStateOf("") }
+    var selectedLevel by rememberSaveable { mutableStateOf("Все") }
+    val entries = remember(result, query, selectedLevel) {
+        val parsed = if (list == null) emptyList() else (0 until list.length()).mapNotNull { list.optJSONObject(it) }
+        parsed.filter { entry ->
+            val message = entry.optString("msg", entry.optString("message", ""))
+            val priority = entry.optString("priority", entry.optString("level", ""))
+            val matchesText = query.isBlank() || message.contains(query, ignoreCase = true)
+            val normalized = priority.lowercase()
+            val matchesLevel = selectedLevel == "Все" ||
+                (selectedLevel == "Ошибка" && normalized in listOf("err", "error", "crit", "alert", "emerg", "3", "2", "1", "0")) ||
+                (selectedLevel == "Предупреждение" && normalized in listOf("warn", "warning", "4"))
+            matchesText && matchesLevel
+        }.reversed()
+    }
+    LazyColumn(contentPadding = PaddingValues(vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        item { Text("Системный журнал", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold) }
+        item {
+            OutlinedTextField(value = query, onValueChange = { query = it }, modifier = Modifier.fillMaxWidth(),
+                singleLine = true, label = { Text("Поиск по сообщению") }, leadingIcon = { Icon(Icons.Outlined.Search, null) })
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                listOf("Все", "Ошибка", "Предупреждение").forEach { level ->
+                    FilterChip(selected = selectedLevel == level, onClick = { selectedLevel = level }, label = { Text(level) })
+                }
+            }
+        }
+        if (!loadError.isNullOrBlank()) item {
+            InfoCard("Не удалось прочитать журнал") {
+                Text(loadError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        if (result == null) item { EmptyState("Журнал не получен. Проверь доступ к ubus log.read и команде logread.") }
+        else if (entries.isEmpty()) item { EmptyState(if (loadError.isNullOrBlank()) "Журнал пуст или записей по фильтру нет." else "Нет доступных записей журнала.") }
+        else items(entries) { line ->
+            val message = line.optString("msg", line.optString("message", line.optString("line", "—")))
+            val timestamp = line.optString("time", line.optString("timestamp", ""))
+            val priority = line.optString("priority", line.optString("level", "info"))
+            InfoCard(priority.ifBlank { "Системное сообщение" }) {
+                Text(message, style = MaterialTheme.typography.bodyMedium)
+                if (timestamp.isNotBlank()) Text(timestamp, style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+@Composable
+private fun VpnScreen(status: String?, onRefresh: () -> Unit) {
+    val raw = status.orEmpty()
+    fun section(name: String, next: String? = null): String {
+        val value = raw.substringAfter(name, "")
+        return (if (next == null) value else value.substringBefore(next)).trim()
+    }
+    val processes = section("VPN_PROCESSES", "TAILSCALE_STATUS")
+    val tailscale = section("TAILSCALE_STATUS", "TAILSCALE_IP")
+    val tailscaleIp = section("TAILSCALE_IP", "SING_BOX_VERSION")
+    val singBox = section("SING_BOX_VERSION", "TUNNEL_INTERFACES")
+    val tunnels = section("TUNNEL_INTERFACES", "VPN_PROCESS_STATS")
+    val processStats = section("VPN_PROCESS_STATS", "ROUTES")
+    val routes = section("ROUTES", "VPN_LOGS")
+    val logs = section("VPN_LOGS")
+    val tailscaleLoggedOut = tailscale.contains("Logged out", true) || tailscale.contains("NeedsLogin", true)
+    LazyColumn(contentPadding = PaddingValues(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("VPN и туннели", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, null) }
+            }
+            Text("Состояние Tailscale, sing-box / VLESS, туннельных интерфейсов, маршрутов и системных логов.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        item {
+            InfoCard("Tailscale · ${if (tailscaleLoggedOut) "требуется вход" else "состояние клиента"}") {
+                Text(tailscale.ifBlank { "Клиент не установлен или статус недоступен." },
+                    color = if (tailscaleLoggedOut) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurface,
+                    style = MaterialTheme.typography.bodySmall)
+                if (tailscaleIp.isNotBlank()) InfoLine("Tailscale IPv4", tailscaleIp)
+            }
+        }
+        item {
+            InfoCard("sing-box · VLESS / прокси") {
+                Text(singBox.ifBlank { "Версия sing-box не получена." }, style = MaterialTheme.typography.bodySmall)
+                Text(processes.ifBlank { "Активные VPN-процессы не обнаружены." },
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        item {
+            InfoCard("Туннельные интерфейсы") {
+                Text(tunnels.ifBlank { "Интерфейсы tailscale / tun / wg не найдены." },
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+            }
+        }
+        item {
+            InfoCard("Нагрузка VPN-процессов · top") {
+                Text(processStats.ifBlank { "Статистика процессов недоступна." },
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+            }
+        }
+        item {
+            InfoCard("Маршрутизация") {
+                Text(routes.ifBlank { "Таблица маршрутов недоступна." },
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+            }
+        }
+        item {
+            InfoCard("Журнал VPN") {
+                Text(logs.ifBlank { "Сообщений VPN в системном журнале нет." },
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+            }
+        }
+    }
+}
+
+
+private data class FirewallUciSection(val id: String, val type: String, val values: JSONObject)
+
+private fun parseFirewallUciSections(raw: String): List<FirewallUciSection> {
+    val start = raw.indexOf('{')
+    val end = raw.lastIndexOf('}')
+    if (start < 0 || end <= start) return emptyList()
+    val root = runCatching { JSONObject(raw.substring(start, end + 1)) }.getOrNull() ?: return emptyList()
+    val values = root.optJSONObject("values") ?: root
+    val result = mutableListOf<FirewallUciSection>()
+    val keys = values.keys()
+    while (keys.hasNext()) {
+        val id = keys.next()
+        val section = values.optJSONObject(id) ?: continue
+        val type = section.optString(".type", section.optString("type", ""))
+        if (type.isNotBlank()) result += FirewallUciSection(id, type, section)
+    }
+    return result
+}
+
+private fun firewallValue(section: JSONObject, key: String): String {
+    val value = section.opt(key) ?: return "—"
+    return when (value) {
+        is JSONArray -> (0 until value.length()).mapNotNull { value.optString(it).takeIf(String::isNotBlank) }.joinToString(", ").ifBlank { "—" }
+        JSONObject.NULL -> "—"
+        else -> value.toString().ifBlank { "—" }
+    }
+}
+
+@Composable
+private fun FirewallScreen(rules: String?, onRefresh: () -> Unit) {
+    val text = rules.orEmpty()
+    val sections = text.split("NFT_RULESET")
+    val uci = sections.firstOrNull().orEmpty().substringAfter("UCI_FIREWALL", "")
+    val nft = sections.getOrNull(1).orEmpty()
+    val nftLines = nft.lines().filter { it.isNotBlank() }
+    val parsed = remember(uci) { parseFirewallUciSections(uci) }
+    val zones = parsed.filter { it.type == "zone" }
+    val rulesList = parsed.filter { it.type == "rule" }
+    val redirects = parsed.filter { it.type == "redirect" }
+    val defaults = parsed.filter { it.type == "defaults" }
+    var showRaw by remember { mutableStateOf(false) }
+
+    LazyColumn(contentPadding = PaddingValues(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Правила firewall", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, null) }
+            }
+            Text("Зоны, правила фильтрации, перенаправления портов и фактический ruleset nftables.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }        item {
+            InfoCard("Сводка конфигурации") {
+                InfoLine("Зоны", zones.size.toString())
+                InfoLine("Правила", rulesList.size.toString())
+                InfoLine("Перенаправления портов", redirects.size.toString())
+                InfoLine("Параметры по умолчанию", defaults.size.toString())
+                if (parsed.isEmpty()) Text("Не удалось разобрать структуру UCI. Ниже доступен исходный ответ RPC.",
+                    color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        if (zones.isNotEmpty()) {
+            item { Text("Зоны сети", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
+            items(zones, key = { it.id }) { entry ->
+                InfoCard(firewallValue(entry.values, "name").let { if (it == "—") "Зона · ${entry.id}" else it }) {
+                    InfoLine("Сеть", firewallValue(entry.values, "network"))
+                    InfoLine("Входящий трафик", firewallValue(entry.values, "input"))
+                    InfoLine("Исходящий трафик", firewallValue(entry.values, "output"))
+                    InfoLine("Пересылка", firewallValue(entry.values, "forward"))
+                    InfoLine("Маскарадинг", firewallValue(entry.values, "masq"))
+                    InfoLine("MTU fix", firewallValue(entry.values, "mtu_fix"))
+                }
+            }
+        }
+        if (rulesList.isNotEmpty()) {
+            item { Text("Правила фильтрации", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
+            items(rulesList, key = { it.id }) { entry ->
+                InfoCard(firewallValue(entry.values, "name").let { if (it == "—") "Правило · ${entry.id}" else it }) {
+                    InfoLine("Источник", firewallValue(entry.values, "src"))
+                    InfoLine("Назначение", firewallValue(entry.values, "dest"))
+                    InfoLine("Протокол", firewallValue(entry.values, "proto"))
+                    InfoLine("Порт источника", firewallValue(entry.values, "src_port"))
+                    InfoLine("Порт назначения", firewallValue(entry.values, "dest_port"))
+                    InfoLine("Действие", firewallValue(entry.values, "target"))
+                    InfoLine("Включено", firewallValue(entry.values, "enabled"))
+                }
+            }
+        }
+        if (redirects.isNotEmpty()) {
+            item { Text("Перенаправления портов", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
+            items(redirects, key = { it.id }) { entry ->
+                InfoCard(firewallValue(entry.values, "name").let { if (it == "—") "Перенаправление · ${entry.id}" else it }) {
+                    InfoLine("Внешняя зона", firewallValue(entry.values, "src"))
+                    InfoLine("Внешний порт", firewallValue(entry.values, "src_dport"))
+                    InfoLine("Внутренний адрес", firewallValue(entry.values, "dest_ip"))
+                    InfoLine("Внутренний порт", firewallValue(entry.values, "dest_port"))
+                    InfoLine("Протокол", firewallValue(entry.values, "proto"))
+                    InfoLine("Включено", firewallValue(entry.values, "enabled"))
+                }
+            }
+        }
+        item {
+            InfoCard("Активные правила nftables · ${nftLines.size} строк") {
+                Text(if (nftLines.isEmpty()) nft.trim().ifBlank { "Не удалось прочитать nft ruleset. Проверь наличие nftables и разрешения RPC file.exec." }
+                    else nftLines.joinToString("\n"),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+            }
+        }
+        item {
+            OutlinedButton(onClick = { showRaw = !showRaw }, modifier = Modifier.fillMaxWidth()) {
+                Text(if (showRaw) "Скрыть исходную конфигурацию UCI" else "Показать исходную конфигурацию UCI")
+            }
+            if (showRaw) InfoCard("Исходный ответ UCI") {
+                Text(uci.ifBlank { "UCI firewall не получен." },
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SshScreen(host: String, defaultUser: String, connected: Boolean, connecting: Boolean,
+                      output: String, onConnect: (String, Int, String, String) -> Unit,
+                      onSend: (String) -> Unit, onDisconnect: () -> Unit) {
+    var hostValue by rememberSaveable(host) { mutableStateOf(host) }
+    var portValue by rememberSaveable { mutableStateOf("22") }
+    var userValue by rememberSaveable(defaultUser) { mutableStateOf(defaultUser) }
+    var passwordValue by remember { mutableStateOf("") }
+    var command by rememberSaveable { mutableStateOf("") }
+    Column(Modifier.fillMaxSize().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("SSH-консоль", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text("Отдельная интерактивная shell-сессия Dropbear. Команды выполняются непосредственно на роутере.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (!connected) {
+            OutlinedTextField(hostValue, { hostValue = it }, Modifier.fillMaxWidth(),
+                label = { Text("Адрес роутера") }, singleLine = true)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(portValue, { portValue = it.filter(Char::isDigit).take(5) },
+                    Modifier.weight(0.35f), label = { Text("Порт") }, singleLine = true)
+                OutlinedTextField(userValue, { userValue = it }, Modifier.weight(0.65f),
+                    label = { Text("Пользователь") }, singleLine = true)
+            }
+            OutlinedTextField(passwordValue, { passwordValue = it }, Modifier.fillMaxWidth(),
+                label = { Text("Пароль SSH") }, visualTransformation = PasswordVisualTransformation(), singleLine = true)
+            Button(onClick = {
+                val port = portValue.toIntOrNull() ?: 22
+                if (hostValue.isNotBlank() && userValue.isNotBlank() && passwordValue.isNotBlank() && port in 1..65535)
+                    onConnect(hostValue, port, userValue, passwordValue)
+            }, enabled = !connecting && hostValue.isNotBlank() && userValue.isNotBlank() &&
+                passwordValue.isNotBlank() && (portValue.toIntOrNull() ?: 0) in 1..65535,
+                modifier = Modifier.fillMaxWidth()) {
+                if (connecting) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                else Icon(Icons.Outlined.Terminal, null)
+                Spacer(Modifier.width(8.dp))
+                Text(if (connecting) "Подключение…" else "Открыть SSH-сессию")
+            }
+            Text("По умолчанию используется порт 22. Пароль не сохраняется в истории терминала.",
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("● SSH подключён · $userValue@$hostValue", color = androidx.compose.ui.graphics.Color(0xFF55D6A7),
+                    style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                TextButton(onClick = onDisconnect) { Text("Завершить") }
+            }
+            Surface(Modifier.weight(1f).fillMaxWidth(), color = androidx.compose.ui.graphics.Color(0xFF10151D),
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp)) {
+                LazyColumn(Modifier.fillMaxSize().padding(10.dp)) {
+                    item { Text(output, color = androidx.compose.ui.graphics.Color(0xFFB6F5D0),
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall) }
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(command, { command = it }, Modifier.weight(1f),
+                    label = { Text("Команда") }, singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        imeAction = androidx.compose.ui.text.input.ImeAction.Send),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSend = {
+                        if (command.isNotBlank()) { onSend(command); command = "" }
+                    }))
+                IconButton(onClick = { if (command.isNotBlank()) { onSend(command); command = "" } }) {
+                    Icon(Icons.Outlined.Send, "Выполнить")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun GaugeCard(title: String, value: String, progress: Float, caption: String,
+                      modifier: Modifier = Modifier, accent: androidx.compose.ui.graphics.Color) {
+    val trackColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.8f)
+    val animatedProgress by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = progress.coerceIn(0f, 1f),
+        animationSpec = androidx.compose.animation.core.tween(durationMillis = 850),
+        label = "gauge-$title"
+    )
+    ElevatedCard(modifier, shape = androidx.compose.foundation.shape.RoundedCornerShape(22.dp),
+        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 7.dp),
+            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Box(Modifier.size(68.dp), contentAlignment = Alignment.Center) {
+                androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+                    val stroke = 9.dp.toPx()
+                    drawArc(color = trackColor, startAngle = -90f, sweepAngle = 360f, useCenter = false,
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round))
+                    drawArc(brush = androidx.compose.ui.graphics.Brush.sweepGradient(
+                        listOf(accent.copy(alpha = 0.55f), accent, accent.copy(alpha = 0.85f))),
+                        startAngle = -90f, sweepAngle = 360f * animatedProgress, useCenter = false,
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round))
+                }
+                Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            }
+            Text(caption, style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+        }
+    }
+}
+
+@Composable
+private fun TrafficCard(history: List<TrafficPoint>, rx: Long?, tx: Long?) {
+    val rxColor = MaterialTheme.colorScheme.secondary
+    val txColor = MaterialTheme.colorScheme.primary
+    InfoCard("Интернет · WAN (eth1)") {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Column {
+                Text("↓ Приём", color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall)
+                Text(rx?.let { formatRate(it) } ?: "Сбор данных…",
+                    color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold)
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Text("↑ Передача", color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall)
+                Text(tx?.let { formatRate(it) } ?: "Сбор данных…",
+                    color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+            }
+        }
+        androidx.compose.foundation.Canvas(Modifier.fillMaxWidth().height(112.dp)) {
+            if (history.size < 2) return@Canvas
+            val maxValue = (history.maxOf { maxOf(it.rx, it.tx) }).coerceAtLeast(1L).toFloat()
+            val step = size.width / (history.size - 1).toFloat()
+            fun drawSeries(selector: (TrafficPoint) -> Long, color: androidx.compose.ui.graphics.Color) {
+                val path = androidx.compose.ui.graphics.Path()
+                history.forEachIndexed { index, point ->
+                    val x = index * step
+                    val y = size.height - (selector(point).toFloat() / maxValue) * (size.height - 8.dp.toPx()) - 4.dp.toPx()
+                    if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)                }
+                drawPath(path, color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx()))
+            }
+            drawSeries({ it.rx }, rxColor)
+            drawSeries({ it.tx }, txColor)
+        }
+        Text(if (history.size < 2) "График появится после второго замера" else "Скорость по интервалам опроса · 5 секунд",
+            color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+@Composable
+private fun MetricCard(title: String, value: String, modifier: Modifier = Modifier) {
+    ElevatedCard(modifier) {
+        Column(Modifier.padding(16.dp)) {
+            Text(title, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(6.dp))
+            Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@Composable
+internal fun InfoCard(title: String, modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+    val shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp)
+    val edge = androidx.compose.ui.graphics.Brush.linearGradient(
+        listOf(MaterialTheme.colorScheme.primary.copy(alpha = 0.42f),
+            MaterialTheme.colorScheme.secondary.copy(alpha = 0.28f),
+            MaterialTheme.colorScheme.tertiary.copy(alpha = 0.34f)))
+    ElevatedCard(modifier.fillMaxWidth().border(androidx.compose.foundation.BorderStroke(1.dp, edge), shape),
+        shape = shape,
+        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            content()
+        }
+    }
+}
+
+@Composable
+internal fun InfoLine(label: String, value: String) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, fontWeight = FontWeight.Medium)
+    }
+}
+
+@Composable
+private fun EmptyState(message: String) {
+    Text(message, Modifier.fillMaxWidth().padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+internal class SshTerminal(private val context: android.content.Context) {
+    var fingerprint: String = ""
+        private set
+    private var session: Session? = null
+    private var channel: ChannelShell? = null
+    private var input: InputStream? = null
+    private var output: OutputStream? = null
+
+    fun connect(host: String, port: Int, username: String, password: String) {
+        val jsch = JSch()
+        val ssh = jsch.getSession(username, host, port)
+        ssh.setPassword(password)
+        val config = java.util.Properties().apply {
+            put("StrictHostKeyChecking", "no")
+            put("PreferredAuthentications", "password,keyboard-interactive")
+        }
+        ssh.setConfig(config)
+        ssh.timeout = 10000
+        ssh.connect(10000)
+        val hostKeyFingerprint = ssh.hostKey.getFingerPrint(jsch)
+        val hostKeyPrefs = context.getSharedPreferences("routerdash_ssh_hosts", 0)
+        val hostKeyId = "$host:$port"
+        val knownFingerprint = hostKeyPrefs.getString(hostKeyId, null)
+        if (knownFingerprint != null && knownFingerprint != hostKeyFingerprint) {
+            ssh.disconnect()
+            throw SecurityException("SSH host key изменился для $host:$port. Проверь роутер перед повторным подключением.")
+        }
+        if (knownFingerprint == null) hostKeyPrefs.edit().putString(hostKeyId, hostKeyFingerprint).apply()
+        fingerprint = hostKeyFingerprint
+        val shell = ssh.openChannel("shell") as ChannelShell
+        shell.setPtyType("xterm", 100, 30, 1000, 700)
+        val shellInput = shell.inputStream
+        val shellOutput = shell.outputStream
+        shell.connect(10000)
+        session = ssh
+        channel = shell
+        input = shellInput
+        output = shellOutput
+    }
+
+    @Synchronized
+    fun send(command: String) {
+        val stream = output ?: throw IllegalStateException("SSH-сессия не открыта")
+        stream.write((command + "\n").toByteArray(Charsets.UTF_8))
+        stream.flush()
+    }
+
+    @Synchronized
+    fun readAvailable(): String {
+        val stream = input ?: return ""
+        if (channel?.isConnected != true) return ""
+        val available = stream.available()
+        if (available <= 0) return ""
+        val buffer = ByteArray(minOf(available, 8192))
+        val count = stream.read(buffer)
+        return if (count > 0) String(buffer, 0, count, Charsets.UTF_8) else ""
+    }
+
+    /** Runs only built-in read-only diagnostics over the authenticated SSH session. */
+    @Synchronized
+    fun execReadOnly(command: String): String {
+        val allowed = setOf("top -b -n 1", "busybox top -b -n 1", "ps -o pid,comm,rss", "ps", "ps w",
+            "df -kP", "df -h", "mount", "cat /proc/mounts", "cat /proc/diskstats", "block info",
+            "ls -l /dev", "ls -1 /sys/block", "ls -1 /etc/init.d",
+            "cat /proc/loadavg", "cat /proc/stat",
+            "cat /sys/class/thermal/thermal_zone0/temp", "cat /sys/class/hwmon/hwmon0/temp1_input",
+            "ip -o addr", "ip route", "tailscale status", "tailscale ip -4", "wg show", "sing-box version")
+        require(command in allowed) { "Команда не входит в список разрешённых диагностических операций." }
+        val active = session ?: throw IllegalStateException("SSH-сессия не открыта.")
+        check(active.isConnected) { "SSH-соединение потеряно. Подключись заново." }
+        val channel = active.openChannel("exec") as ChannelExec
+        channel.setCommand(command)
+        val stdout = channel.inputStream
+        val stderr = ByteArrayOutputStream()
+        channel.setErrStream(stderr)
+        val output = ByteArrayOutputStream()
+        try {
+            channel.connect(10000)
+            val buffer = ByteArray(4096)
+            val deadline = System.currentTimeMillis() + 12000L
+            while (System.currentTimeMillis() < deadline) {
+                while (stdout.available() > 0) { val count = stdout.read(buffer); if (count > 0) output.write(buffer, 0, count) }
+                if (channel.isClosed) break
+                Thread.sleep(25)
+            }
+            while (stdout.available() > 0) { val count = stdout.read(buffer); if (count > 0) output.write(buffer, 0, count) }
+            if (!channel.isClosed) throw IllegalStateException("Превышено время ожидания SSH-команды.")
+            val result = output.toString(Charsets.UTF_8.name())
+            if (channel.exitStatus != 0) throw IllegalStateException(stderr.toString(Charsets.UTF_8.name()).trim().ifBlank { "Команда завершилась с кодом ${channel.exitStatus}" })
+            return result
+        } finally { runCatching { channel.disconnect() } }
+    }
+
+    private fun openSftp(): ChannelSftp {
+        val active = session ?: throw IllegalStateException("SSH-сессия не открыта.")
+        if (!active.isConnected) throw IllegalStateException("SSH-соединение потеряно. Подключись заново.")
+        return (active.openChannel("sftp") as ChannelSftp).also { it.connect(10000) }
+    }
+
+    internal fun verifyMountedStorage(path: String) {
+        val active = session ?: throw IllegalStateException("SSH-сессия не открыта.")
+        val quoted = path.replace("'", "'\\''")
+        val command = "p='$quoted'; awk -v p=\"\$p\" '$2 != \"/\" && $2 != \"/rom\" && $2 != \"/overlay\" && $2 != \"/tmp\" && (p == $2 || index(p, $2 \"/\") == 1) { if (length($2) > best) { best=length($2); dev=$1; mount=$2 } } END { if (best == 0) exit 2; print dev \" \" mount }' /proc/mounts"
+        val channel = active.openChannel("exec") as ChannelExec
+        channel.setCommand(command)
+        val input = channel.inputStream
+        val output = ByteArrayOutputStream()
+        try {
+            channel.connect(10000)
+            val buffer = ByteArray(1024)
+            val deadline = System.currentTimeMillis() + 8000L
+            while (!channel.isClosed && System.currentTimeMillis() < deadline) {
+                while (input.available() > 0) {
+                    val count = input.read(buffer)
+                    if (count > 0) output.write(buffer, 0, count)
+                }
+                Thread.sleep(30)
+            }
+            while (input.available() > 0) {
+                val count = input.read(buffer)
+                if (count > 0) output.write(buffer, 0, count)
+            }
+            if (!channel.isClosed || channel.exitStatus != 0) {
+                throw IllegalStateException("Не подтверждено подключение внешнего SSD для пути $path. Проверь, что диск смонтирован в OpenWrt.")
+            }
+            if (output.toString(Charsets.UTF_8.name()).trim().isBlank()) {
+                throw IllegalStateException("Не удалось определить точку монтирования SSD.")
+            }
+        } finally { runCatching { channel.disconnect() } }
+    }
+
+    internal fun listRemote(path: String): List<RemoteSyncEntry> {
+        val sftp = openSftp()
+        try {
+            val rows = sftp.ls(path) as java.util.Vector<*>
+            return rows.mapNotNull { row ->
+                val entry = row as? ChannelSftp.LsEntry ?: return@mapNotNull null
+                if (entry.filename == "." || entry.filename == "..") return@mapNotNull null
+                val attrs = entry.attrs
+                RemoteSyncEntry(entry.filename, attrs.isDir, attrs.size, attrs.mTime.toLong() * 1000L)
+            }
+        } catch (e: Exception) {
+            throw IllegalStateException("Не удалось прочитать SFTP-каталог $path: ${e.message}", e)
+        } finally { runCatching { sftp.disconnect() } }
+    }
+
+    internal fun ensureRemoteDirectory(path: String) {
+        val sftp = openSftp()        try {
+            var current = if (path.startsWith("/")) "/" else ""
+            path.split('/').filter { it.isNotBlank() }.forEach { part ->
+                current = if (current == "/") "/$part" else if (current.isBlank()) part else "$current/$part"
+                try {
+                    val attrs = sftp.stat(current)
+                    if (!attrs.isDir) throw IllegalStateException("$current существует, но это не папка.")
+                } catch (e: com.jcraft.jsch.SftpException) {
+                    sftp.mkdir(current)
+                }
+            }
+        } finally { runCatching { sftp.disconnect() } }
+    }
+
+    internal fun uploadFile(input: InputStream, remotePath: String) {
+        val sftp = openSftp()
+        val token = java.util.UUID.randomUUID().toString()
+        val parent = remotePath.substringBeforeLast('/', "")
+        val name = remotePath.substringAfterLast('/')
+        require(name.isNotBlank() && name != "." && name != "..") { "Недопустимое имя удалённого файла." }
+        val temporary = if (parent.isBlank()) ".$name.routerdash-part-$token" else "$parent/.$name.routerdash-part-$token"
+        val backup = if (parent.isBlank()) ".$name.routerdash-backup-$token" else "$parent/.$name.routerdash-backup-$token"
+        var backedUp = false
+        try {
+            sftp.put(input, temporary, ChannelSftp.OVERWRITE)
+            val existing = try {
+                val attrs = sftp.stat(remotePath)
+                if (attrs.isDir) throw IllegalStateException("На месте файла уже находится папка: $remotePath")
+                true
+            } catch (e: com.jcraft.jsch.SftpException) {
+                if (e.id == ChannelSftp.SSH_FX_NO_SUCH_FILE) false else throw e
+            }
+            if (existing) {
+                sftp.rename(remotePath, backup)
+                backedUp = true
+            }
+            try {
+                sftp.rename(temporary, remotePath)
+            } catch (e: Exception) {
+                if (backedUp) runCatching { sftp.rename(backup, remotePath) }
+                throw e
+            }
+            if (backedUp) runCatching { sftp.rm(backup) }
+        } catch (e: Exception) {
+            runCatching { sftp.rm(temporary) }
+            if (backedUp) {
+                runCatching {
+                    if (runCatching { sftp.stat(remotePath) }.isFailure) sftp.rename(backup, remotePath)
+                }
+            }
+            throw IllegalStateException("Ошибка безопасной загрузки на SSD: ${e.message}", e)
+        } finally { runCatching { sftp.disconnect() } }
+    }
+
+    internal fun downloadFile(remotePath: String, output: OutputStream) {
+        val sftp = openSftp()
+        try { sftp.get(remotePath, output) }
+        catch (e: Exception) { throw IllegalStateException("Ошибка скачивания с SSD: ${e.message}", e) }
+        finally { runCatching { sftp.disconnect() } }
+    }
+
+    @Synchronized
+    fun close() {
+        runCatching { channel?.disconnect() }
+        runCatching { session?.disconnect() }
+        input = null
+        output = null
+        channel = null
+        session = null
+    }
+}
+
+private class RouterApi(val baseUrl: String) {
+    private val http = OkHttpClient.Builder()
+        .connectTimeout(8, TimeUnit.SECONDS).readTimeout(12, TimeUnit.SECONDS)
+        .callTimeout(15, TimeUnit.SECONDS).build()
+    private var session = ""
+    private val mediaType = "application/json; charset=utf-8".toMediaType()
+
+    fun login(username: String, password: String) {
+        // OpenWrt's standard JSON-RPC endpoint accepts session.login on /ubus.
+        // The all-zero session ID is used only to start an unauthenticated session.
+        val params = JSONArray()
+            .put("00000000000000000000000000000000")
+            .put("session")
+            .put("login")
+            .put(JSONObject().put("username", username).put("password", password))
+        val body = JSONObject()
+            .put("jsonrpc", "2.0")
+            .put("id", 1)
+            .put("method", "call")
+            .put("params", params)
+            .toString()
+        val root = JSONObject(post("/ubus", body))
+        if (root.has("error")) {
+            val message = root.optJSONObject("error")?.optString("message")
+            throw IllegalStateException(message?.takeIf { it.isNotBlank() } ?: "Ошибка авторизации ubus")
+        }
+        val result = root.optJSONArray("result")
+            ?: throw IllegalStateException("Роутер вернул неожиданный ответ на авторизацию")
+        val status = result.optInt(0, -1)
+        if (status != 0) {
+            throw IllegalStateException("OpenWrt отклонил вход (код ubus: $status). Проверь логин и пароль.")
+        }
+        session = result.optJSONObject(1)?.optString("ubus_rpc_session").orEmpty()
+        if (session.isBlank() || session == "null") {
+            throw IllegalStateException("OpenWrt не вернул токен сессии ubus")
+        }
+    }
+
+    fun callArray(objectName: String, method: String, args: JSONObject = JSONObject()): JSONArray {
+        check(session.isNotBlank()) { "Нет сессии LuCI. Подключись заново." }
+        val params = JSONArray().put(session).put(objectName).put(method).put(args)
+        val body = JSONObject().put("jsonrpc", "2.0").put("id", System.currentTimeMillis())
+            .put("method", "call").put("params", params).toString()
+        val root = JSONObject(post("/ubus", body))
+        if (root.has("error")) throw IllegalStateException(root.optJSONObject("error")?.optString("message") ?: "Ошибка ubus")
+        val result = root.optJSONArray("result")
+            ?: throw IllegalStateException("Роутер вернул неожиданный ответ для $objectName.$method")
+        val status = result.optInt(0, -1)
+        if (status != 0) throw IllegalStateException("Ошибка ubus $objectName.$method: код $status")
+        return result.optJSONArray(1)
+            ?: throw IllegalStateException("$objectName.$method вернул не список")
+    }
+
+    fun call(objectName: String, method: String, args: JSONObject = JSONObject()): JSONObject {
+        check(session.isNotBlank()) { "Нет сессии LuCI. Подключись заново." }
+        val params = JSONArray().put(session).put(objectName).put(method).put(args)
+        val body = JSONObject().put("jsonrpc", "2.0").put("id", System.currentTimeMillis())
+            .put("method", "call").put("params", params).toString()
+        val root = JSONObject(post("/ubus", body))
+        if (root.has("error")) throw IllegalStateException(root.optJSONObject("error")?.optString("message") ?: "Ошибка ubus")
+        val result = root.opt("result")
+        if (result is JSONArray) {
+            if (result.length() > 0 && result.optInt(0, 0) != 0)
+                throw IllegalStateException("Ошибка ubus: код " + result.opt(0))
+            return result.optJSONObject(1) ?: JSONObject()
+        }
+        return result as? JSONObject ?: JSONObject()
+    }
+
+    fun execReadOnly(command: String, args: List<String> = emptyList()): String {
+        val params = JSONArray()
+        args.forEach { params.put(it) }
+        val result = call("file", "exec", JSONObject().put("command", command).put("params", params))
+        val code = result.optInt("code", 0)
+        val stderr = result.optString("stderr")
+        if (code != 0) throw IllegalStateException(stderr.ifBlank { command + " завершилась с кодом " + code })
+        return result.optString("stdout")
+    }
+
+    fun aria2AddUri(uri: String) {
+        val base = URI(baseUrl)
+        val endpoint = URI(base.scheme, null, base.host, 6800, "/jsonrpc", null, null).toASCIIString()
+        val params = JSONArray().put(JSONArray().put(uri))
+        val body = JSONObject().put("jsonrpc", "2.0").put("id", System.currentTimeMillis())
+            .put("method", "aria2.addUri").put("params", params).toString()
+        val request = Request.Builder().url(endpoint).post(body.toRequestBody(mediaType)).build()
+        http.newCall(request).execute().use { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw IllegalStateException("aria2: HTTP ${response.code}")
+            val json = JSONObject(text)
+            if (json.has("error")) throw IllegalStateException("aria2: " +
+                (json.optJSONObject("error")?.optString("message") ?: "ошибка добавления"))
+        }
+    }
+
+    fun aria2Overview(): JSONObject {
+        fun ariaCall(method: String, params: JSONArray = JSONArray()): Any? {
+            val base = URI(baseUrl)
+            val endpoint = URI(base.scheme, null, base.host, 6800, "/jsonrpc", null, null).toASCIIString()
+            val body = JSONObject().put("jsonrpc", "2.0").put("id", System.currentTimeMillis())
+                .put("method", method).put("params", params).toString()
+            val request = Request.Builder().url(endpoint).post(body.toRequestBody(mediaType)).build()
+            http.newCall(request).execute().use { response ->
+                val text = response.body?.string().orEmpty()
+                if (!response.isSuccessful) throw IllegalStateException("aria2: HTTP ${response.code}")
+                val json = JSONObject(text)
+                if (json.has("error")) throw IllegalStateException("aria2: " +
+                    (json.optJSONObject("error")?.optString("message") ?: "ошибка JSON-RPC"))
+                return json.opt("result")
+            }
+        }
+        val global = ariaCall("aria2.getGlobalStat") as? JSONObject ?: JSONObject()
+        val active = ariaCall("aria2.tellActive") as? JSONArray ?: JSONArray()
+        val waiting = ariaCall("aria2.tellWaiting", JSONArray().put(0).put(50)) as? JSONArray ?: JSONArray()
+        val stopped = ariaCall("aria2.tellStopped", JSONArray().put(0).put(50)) as? JSONArray ?: JSONArray()
+        return JSONObject().put("global", global).put("active", active)
+            .put("waiting", waiting).put("stopped", stopped)
+    }
+
+    private fun post(path: String, body: String): String {
+        val request = Request.Builder().url(baseUrl + path)
+            .post(body.toRequestBody(mediaType)).header("X-Requested-With", "XMLHttpRequest").build()
+        http.newCall(request).execute().use { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                val detail = text.replace(Regex("\\s+"), " ").take(180)
+                val suffix = if (detail.isBlank()) "" else " — $detail"
+                throw IllegalStateException("HTTP " + response.code + " на " + path + suffix)            }
+            return text
+        }
+    }
+}
+
+private fun readUbusFile(api: RouterApi, path: String): String? {
+    val response = api.call("file", "read", JSONObject().put("path", path))
+    val encoded = response.optString("data")
+    if (encoded.isBlank() || encoded == "null") return null
+    return runCatching {
+        String(android.util.Base64.decode(encoded, android.util.Base64.DEFAULT), Charsets.UTF_8)
+    }.getOrElse { encoded }
+}
+
+internal fun parseLoadAverage(raw: String?): String? {
+    val values = raw?.trim()?.split(Regex("\\s+"))?.take(3) ?: return null
+    if (values.size != 3 || values.any { it.toDoubleOrNull() == null }) return null
+    return values.joinToString(" / ") { String.format(java.util.Locale.US, "%.2f", it.toDouble()) }
+}
+
+internal fun parseTemperatureC(raw: String?): Double? {
+    val value = raw?.trim()?.toDoubleOrNull() ?: return null
+    val celsius = if (value > 1000.0) value / 1000.0 else value
+    return celsius.takeIf { it in -20.0..150.0 }
+}
+
+private fun readRouterTemperature(api: RouterApi, ssh: SshTerminal?): Double? {
+    val paths = listOf("/sys/class/thermal/thermal_zone0/temp", "/sys/class/hwmon/hwmon0/temp1_input")
+    for (path in paths) {
+        val rpcValue = runCatching { readUbusFile(api, path) }.getOrNull()
+        val sshValue = if (rpcValue.isNullOrBlank()) runCatching { ssh?.execReadOnly("cat $path") }.getOrNull() else null
+        val parsed = parseTemperatureC(rpcValue?.takeIf { it.isNotBlank() } ?: sshValue)
+        if (parsed != null) return parsed
+    }
+    return null
+}
+
+private fun readVpnDiagnostics(ssh: SshTerminal?): String {
+    if (ssh == null) return "Нет данных VPN: подключи SSH в разделе «SSH-терминал»."
+    fun read(command: String): String = runCatching { ssh.execReadOnly(command).trim() }.getOrDefault("")
+    val processes = read("ps").lineSequence()
+        .filter { Regex("tailscaled|sing-box|xray|openvpn|wireguard").containsMatchIn(it) }
+        .toList().joinToString("\n")
+    val addresses = read("ip -o addr")
+    val routes = read("ip route")
+    val tailscale = read("tailscale status")
+    val tailscaleIp = read("tailscale ip -4")
+    val wireguard = read("wg show")
+    val singBox = read("sing-box version")
+    val sections = listOf(
+        "VPN-процессы" to processes,
+        "VPN-интерфейсы и адреса" to addresses.lineSequence().filter { Regex("tailscale|tun[0-9]*|wg[0-9]*").containsMatchIn(it) }.joinToString("\n"),
+        "Маршруты" to routes.lineSequence().filter { Regex("tailscale|tun|wg").containsMatchIn(it) }.joinToString("\n"),
+        "Tailscale status" to tailscale,
+        "Tailscale IPv4" to tailscaleIp,
+        "WireGuard" to wireguard,
+        "sing-box" to singBox
+    ).filter { it.second.isNotBlank() }
+    return if (sections.isEmpty()) "Не удалось получить подтверждённые сведения о VPN через SSH."
+        else sections.joinToString("\n\n") { (title, value) -> "$title:\n$value" }
+}
+
+internal fun normalizeServiceInventory(vararg sources: JSONObject?): JSONObject {
+    val result = JSONObject()
+    fun add(name: String, value: JSONObject) {
+        if (!name.matches(Regex("[A-Za-z0-9_.@+-]{1,128}"))) return
+        val target = result.optJSONObject(name) ?: JSONObject()
+        value.keys().forEach { key -> target.put(key, value.opt(key)) }
+        val instances = value.opt("instances")
+        if (!value.has("running") && instances != null) {
+            val states = mutableListOf<Boolean>()
+            when (instances) {
+                is JSONArray -> for (index in 0 until instances.length()) {
+                    val item = instances.optJSONObject(index) ?: continue
+                    if (item.has("running")) states += item.optBoolean("running")
+                }
+                is JSONObject -> instances.keys().forEach { key ->
+                    val item = instances.optJSONObject(key) ?: return@forEach
+                    if (item.has("running")) states += item.optBoolean("running")
+                }
+            }
+            if (states.isNotEmpty()) target.put("running", states.any { it })
+        }
+        result.put(name, target)
+    }
+    fun visit(obj: JSONObject, depth: Int) {
+        if (depth > 5) return
+        val keys = obj.keys().asSequence().toList()
+        if (keys.any { it in setOf("running", "enabled", "instances", "name", "service") }) return
+        keys.forEach { key ->
+            when (val value = obj.opt(key)) {
+                is JSONObject -> {
+                    val fields = value.keys().asSequence().toSet()
+                    if (fields.any { it in setOf("running", "enabled", "instances", "start", "stop", "reload") }) add(key, value)
+                    else if (fields.isNotEmpty()) visit(value, depth + 1)
+                }
+                is JSONArray -> for (index in 0 until value.length()) {
+                    when (val entryValue = value.opt(index)) {
+                        is JSONObject -> {
+                            val name = entryValue.optString("name", entryValue.optString("service", ""))
+                            if (name.isNotBlank()) add(name, entryValue) else visit(entryValue, depth + 1)
+                        }
+                        is String -> add(entryValue, JSONObject())
+                    }
+                }
+            }
+        }
+    }
+    sources.filterNotNull().forEach { visit(it, 0) }
+    return result
+}
+
+private fun parseCpuTicks(raw: String?): LongArray? {
+    val line = raw?.lineSequence()?.firstOrNull { it.startsWith("cpu ") } ?: return null
+    val values = line.trim().split(Regex("\\s+")).drop(1).mapNotNull { it.toLongOrNull() }
+    if (values.size < 5) return null
+    val total = values.take(8).sum()
+    val idle = values[3] + (values.getOrNull(4) ?: 0L)
+    return longArrayOf(total, idle)
+}
+
+private fun formatRate(bytesPerSecond: Long): String {
+    if (bytesPerSecond < 1024) return "$bytesPerSecond Б/с"
+    return formatBytes(bytesPerSecond) + "/с"
+}
+
+internal fun formatBytes(bytes: Long): String {
+    if (bytes < 1024) return bytes.toString() + " Б"
+    val units = listOf("КБ", "МБ", "ГБ", "ТБ")
+    var value = bytes.toDouble()
+    var index = -1
+    do { value /= 1024.0; index++ } while (value >= 1024 && index < units.lastIndex)
+    return String.format("%.1f %s", value, units[index])
+}
+
+private fun duration(seconds: Long): String {
+    val days = seconds / 86400
+    val hours = (seconds % 86400) / 3600
+    val minutes = (seconds % 3600) / 60
+    return if (days > 0) days.toString() + "д " + hours + "ч" else hours.toString() + "ч " + minutes + "м"
+}
+
+
+@Suppress("DEPRECATION")
+internal fun encryptedCredentials(context: android.content.Context): android.content.SharedPreferences {
+    val key = androidx.security.crypto.MasterKey.Builder(context).setKeyScheme(androidx.security.crypto.MasterKey.KeyScheme.AES256_GCM).build()
+    return androidx.security.crypto.EncryptedSharedPreferences.create(context, "routerdash_credentials", key,
+        androidx.security.crypto.EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+        androidx.security.crypto.EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM)
+}
+
+private fun saveRouterDashWidgetSnapshot(context: android.content.Context, snapshot: Snapshot, routerUrl: String) {
+    val info = snapshot.info
+    val memory = info?.optJSONObject("memory")
+    val total = memory?.optLong("total") ?: 0L
+    // OpenWrt system.info normally reports free/buffered/cached rather than "available".
+    // Prefer an explicit available value when present, otherwise estimate reclaimable RAM.
+    val explicitAvailable = memory?.optLong("available", -1L) ?: -1L
+    val available = if (explicitAvailable >= 0L) explicitAvailable else {
+        (memory?.optLong("free") ?: 0L) +
+            (memory?.optLong("buffered") ?: 0L) +
+            (memory?.optLong("cached") ?: 0L)
+    }
+    val ramPercent = if (total > 0L) (((total - available).coerceAtLeast(0L) * 100L) / total).coerceIn(0L, 100L).toInt() else -1
+    val board = snapshot.board
+    context.getSharedPreferences("routerdash_widget_cache", 0).edit()
+        .putBoolean("online", true)
+        .putString("router_url", routerUrl)
+        .putString("hostname", board?.optString("hostname").orEmpty().ifBlank { "OpenWrt" })
+        .putString("model", board?.optString("model").orEmpty().ifBlank { "Маршрутизатор" })
+        .putInt("cpu_percent", snapshot.cpuPercent ?: -1)
+        .putInt("ram_percent", ramPercent)
+        .putString("rx_rate", snapshot.rxRate?.let { formatRate(it) } ?: "—")
+        .putString("tx_rate", snapshot.txRate?.let { formatRate(it) } ?: "—")
+        .putString("uptime", info?.optLong("uptime")?.let { duration(it) } ?: "—")
+        .putLong("updated_at", System.currentTimeMillis())
+        .apply()
+    RouterDashWidgetProvider.refreshAll(context)
 }
