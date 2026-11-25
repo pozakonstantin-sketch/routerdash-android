@@ -165,7 +165,7 @@ class MainActivity : FragmentActivity() {
 }
 
 private enum class Screen(val title: String) {
-    OVERVIEW("Обзор"), NETWORK("Сеть"), DEVICES("Устройства"), STORAGE("Диски"), PACKAGES("Пакеты"), DOWNLOADS("Загрузки"), SERVICES("Службы"), VPN("VPN"), FIREWALL("Firewall"), SSH("SSH-терминал"), SYNC("Синхронизация"), LOGS("Журнал"), SETTINGS("Настройки")
+    OVERVIEW("Обзор"), NETWORK("Сеть"), DEVICES("Устройства"), STORAGE("Диски"), PACKAGES("Пакеты"), DOWNLOADS("Загрузки"), SERVICES("Службы"), VPN("VPN"), FIREWALL("Firewall"), PROCESSES("Процессы"), SSH("SSH-терминал"), SYNC("Синхронизация"), LOGS("Журнал"), SETTINGS("Настройки")
 }
 private data class TrafficPoint(val rx: Long, val tx: Long)
 private data class Snapshot(
@@ -583,6 +583,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                                 Screen.PACKAGES to 5,
                                 Screen.DOWNLOADS to 6,
                                 Screen.SERVICES to 7,
+                                Screen.PROCESSES to 14,
                                 Screen.VPN to 8,
                                 Screen.FIREWALL to 9,
                                 Screen.SSH to 10,
@@ -629,6 +630,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                         Screen.PACKAGES -> PackagesScreen(snapshot.packages) { refresh(Screen.PACKAGES) }
                         Screen.DOWNLOADS -> DownloadsScreen(snapshot.downloads, api) { refresh(Screen.DOWNLOADS) }
                         Screen.SERVICES -> ServicesScreen(snapshot.services, snapshot.processes, api) { refresh(Screen.SERVICES) }
+                        Screen.PROCESSES -> ProcessesScreen(snapshot.processes) { refresh(Screen.PROCESSES) }
                         Screen.VPN -> VpnScreen(snapshot.vpnStatus) { refresh(Screen.VPN) }
                         Screen.FIREWALL -> FirewallScreen(snapshot.firewallRules) { refresh(Screen.FIREWALL) }
                         Screen.SYNC -> SyncScreen(
@@ -690,6 +692,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                             Screen.PACKAGES to 5,
                             Screen.DOWNLOADS to 6,
                             Screen.SERVICES to 7,
+                            Screen.PROCESSES to 14,
                             Screen.VPN to 8,
                             Screen.FIREWALL to 9,
                             Screen.SSH to 10,
@@ -1821,6 +1824,48 @@ private fun ServicesScreen(result: JSONObject?, processes: String?, api: RouterA
                 }
                 if (busyService == name) LinearProgressIndicator(Modifier.fillMaxWidth())
             }
+        }
+    }
+}
+
+@Composable
+private fun ProcessesScreen(output: String?, onRefresh: () -> Unit) {
+    val sections = output.orEmpty().split("\n--ROUTERDASH-PS--\n", limit = 2)
+    val top = sections.getOrNull(0).orEmpty().trim()
+    val processRows = sections.getOrNull(1).orEmpty().lineSequence().filter { it.isNotBlank() }.toList()
+    var query by rememberSaveable { mutableStateOf("") }
+    val filteredRows = remember(processRows, query) {
+        processRows.filter { query.isBlank() || it.contains(query, true) }
+    }
+    LazyColumn(contentPadding = PaddingValues(vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically) {
+                Text("Процессы роутера", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, contentDescription = "Обновить процессы") }
+            }
+            Text("Снимок top и список процессов ps.", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        item {
+            InfoCard("Загрузка системы · top") {
+                Text(top.ifBlank { "Нет данных top." },
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        item {
+            OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(),
+                label = { Text("Поиск процесса") }, singleLine = true)
+            Text("${filteredRows.size} строк", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (filteredRows.isEmpty()) item { EmptyState("Список процессов пуст или данные недоступны.") }
+        else items(filteredRows) { row ->
+            Text(row, Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp),
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                style = MaterialTheme.typography.bodySmall)
         }
     }
 }
