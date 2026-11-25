@@ -332,31 +332,35 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                                     }
                                 }
                             }
-                            val diagnostic = if (mounts.length() == 0)
-                                failures.joinToString("\n").ifBlank { "Роутер не вернул список файловых систем." }
-                            else null
-                            val mountResult = runCatching { client.execReadOnly("mount") }
-                                .onFailure { failures += "mount: ${it.message}" }
-                            val mountOutput = mountResult.getOrDefault("")
+                            fun readDiagnostic(label: String, command: String, args: List<String> = emptyList()): String {
+                                return runCatching { client.execReadOnly(command, args) }
+                                    .onFailure { failures += "$label: ${it.message}" }
+                                    .getOrElse { "Недоступно: ${it.message}" }
+                            }
+                            val mountOutput = readDiagnostic("mount", "mount")
                             val mountedPaths = parseMountCommandOutput(mountOutput)
                             val knownMounts = (0 until mounts.length()).mapNotNull { mounts.optJSONObject(it)?.optString("mount") }.toSet()
                             for (mountIndex in 0 until mountedPaths.length()) {
                                 val item = mountedPaths.optJSONObject(mountIndex) ?: continue
                                 if (item.optString("mount") !in knownMounts) mounts.put(item)
                             }
+                            val blockInfo = readDiagnostic("block info", "block", listOf("info"))
+                            val deviceList = readDiagnostic("ls /dev", "ls", listOf("-l", "/dev"))
+                            val sysBlock = readDiagnostic("ls /sys/block", "ls", listOf("-1", "/sys/block"))
+                            val diskStats = readDiagnostic("/proc/diskstats", "cat", listOf("/proc/diskstats"))
+                            val dfHuman = readDiagnostic("df -h", "df", listOf("-h"))
+                            val knownAfterMerge = (0 until mounts.length()).mapNotNull { mounts.optJSONObject(it)?.optString("mount") }.toSet()
+                            if ("/mnt/sda" !in knownAfterMerge && "/mnt/sda1" !in knownAfterMerge) {
+                                failures += "SSD /mnt/sda не обнаружен среди точек монтирования."
+                            }
+                            val diagnostic = failures.joinToString("\n").ifBlank { null }
                             val diskDetails = buildString {
-                                append("BLOCK INFO\n")
-                                append(runCatching { client.execReadOnly("block", listOf("info")) }.getOrElse { "Недоступно: ${it.message}" })
-                                append("\n\nФИЗИЧЕСКИЕ УСТРОЙСТВА\n")
-                                append(runCatching { client.execReadOnly("ls", listOf("-l", "/dev")) }.getOrElse { "Недоступно: ${it.message}" })
-                                append("\n\nРАЗДЕЛЫ /SYS/BLOCK\n")
-                                append(runCatching { client.execReadOnly("ls", listOf("-1", "/sys/block")) }.getOrElse { "Недоступно: ${it.message}" })
-                                append("\n\nDISKSTATS\n")
-                                append(runCatching { client.execReadOnly("cat", listOf("/proc/diskstats")) }.getOrElse { "Недоступно: ${it.message}" })
-                                append("\n\nMOUNT\n")
-                                append(mountOutput.ifBlank { "Нет данных" })
-                                append("\n\nDF -H\n")
-                                append(runCatching { client.execReadOnly("df", listOf("-h")) }.getOrElse { "Недоступно: ${it.message}" })
+                                append("BLOCK INFO\n"); append(blockInfo)
+                                append("\n\nФИЗИЧЕСКИЕ УСТРОЙСТВА\n"); append(deviceList)
+                                append("\n\nРАЗДЕЛЫ /SYS/BLOCK\n"); append(sysBlock)
+                                append("\n\nDISKSTATS\n"); append(diskStats)
+                                append("\n\nMOUNT\n"); append(mountOutput.ifBlank { "Нет данных" })
+                                append("\n\nDF -H\n"); append(dfHuman)
                             }
                             snapshot.copy(storage = mounts, storageError = diagnostic, diskDetails = diskDetails)
                         }
