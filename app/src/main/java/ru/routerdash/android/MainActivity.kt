@@ -338,21 +338,22 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                             val mountOutput = runCatching { client.execReadOnly("mount") }.getOrDefault("")
                             val mountedPaths = parseMountCommandOutput(mountOutput)
                             val knownMounts = (0 until mounts.length()).mapNotNull { mounts.optJSONObject(it)?.optString("mount") }.toSet()
-                            mountedPaths.forEach { item ->
+                            for (mountIndex in 0 until mountedPaths.length()) {
+                                val item = mountedPaths.optJSONObject(mountIndex) ?: continue
                                 if (item.optString("mount") !in knownMounts) mounts.put(item)
                             }
                             val diskDetails = buildString {
-                                append("BLOCK INFO\\n")
+                                append("BLOCK INFO\n")
                                 append(runCatching { client.execReadOnly("block", listOf("info")) }.getOrElse { "Недоступно: ${it.message}" })
-                                append("\\n\\nФИЗИЧЕСКИЕ УСТРОЙСТВА\\n")
+                                append("\n\nФИЗИЧЕСКИЕ УСТРОЙСТВА\n")
                                 append(runCatching { client.execReadOnly("ls", listOf("-l", "/dev")) }.getOrElse { "Недоступно: ${it.message}" })
-                                append("\\n\\nРАЗДЕЛЫ /SYS/BLOCK\\n")
+                                append("\n\nРАЗДЕЛЫ /SYS/BLOCK\n")
                                 append(runCatching { client.execReadOnly("ls", listOf("-1", "/sys/block")) }.getOrElse { "Недоступно: ${it.message}" })
-                                append("\\n\\nDISKSTATS\\n")
+                                append("\n\nDISKSTATS\n")
                                 append(runCatching { client.execReadOnly("cat", listOf("/proc/diskstats")) }.getOrElse { "Недоступно: ${it.message}" })
-                                append("\\n\\nMOUNT\\n")
+                                append("\n\nMOUNT\n")
                                 append(mountOutput.ifBlank { "Нет данных" })
-                                append("\\n\\nDF -H\\n")
+                                append("\n\nDF -H\n")
                                 append(runCatching { client.execReadOnly("df", listOf("-h")) }.getOrElse { "Недоступно: ${it.message}" })
                             }
                             snapshot.copy(storage = mounts, storageError = diagnostic, diskDetails = diskDetails)
