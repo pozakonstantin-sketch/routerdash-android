@@ -335,7 +335,9 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                             val diagnostic = if (mounts.length() == 0)
                                 failures.joinToString("\n").ifBlank { "Роутер не вернул список файловых систем." }
                             else null
-                            val mountOutput = runCatching { client.execReadOnly("mount") }.getOrDefault("")
+                            val mountResult = runCatching { client.execReadOnly("mount") }
+                                .onFailure { failures += "mount: ${it.message}" }
+                            val mountOutput = mountResult.getOrDefault("")
                             val mountedPaths = parseMountCommandOutput(mountOutput)
                             val knownMounts = (0 until mounts.length()).mapNotNull { mounts.optJSONObject(it)?.optString("mount") }.toSet()
                             for (mountIndex in 0 until mountedPaths.length()) {
@@ -411,9 +413,12 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                                 runtime?.keys()?.forEach { key -> merged.put(key, runtime.opt(key)) }
                                 mergedServices.put(name, merged)
                             }
-                            val processOutput = runCatching { client.execReadOnly("top", listOf("-bn1")) }.getOrDefault("") +
-                                "\n--ROUTERDASH-PS--\n" +
-                                runCatching { client.execReadOnly("ps", listOf("-o", "pid,comm,rss")) }.getOrDefault("")
+                            val topResult = runCatching { client.execReadOnly("top", listOf("-b", "-n", "1")) }
+                            val psResult = runCatching { client.execReadOnly("ps") }
+                                .recoverCatching { client.execReadOnly("ps", listOf("w")) }
+                            val topText = topResult.getOrElse { "Не удалось получить top: ${it.message}" }
+                            val psText = psResult.getOrElse { "Не удалось получить список ps: ${it.message}" }
+                            val processOutput = topText + "\n--ROUTERDASH-PS--\n" + psText
                             snapshot.copy(services = mergedServices, processes = processOutput)
                         }
                         Screen.LOGS -> {
@@ -890,7 +895,12 @@ private fun OverviewScreen(s: Snapshot) {
     val used = (total - available).coerceAtLeast(0L)
     val ramPercent = if (total > 0L) (used.toFloat() / total).coerceIn(0f, 1f) else 0f
     val uptime = info?.optLong("uptime")?.let { duration(it) } ?: "—"
-    val load = info?.optJSONArray("load")?.optLong(0)?.let { String.format(java.util.Locale.US, "%.2f", it / 65536.0) } ?: "—"
+    val loadValues = info?.optJSONArray("load")
+    val load = if (loadValues != null && loadValues.length() >= 3) {
+        (0..2).joinToString(" / ") { index ->
+            String.format(java.util.Locale.US, "%.2f", loadValues.optLong(index) / 65536.0)
+        }
+    } else "—"
     val hostname = board?.optString("hostname", "OpenWrt")?.ifBlank { "OpenWrt" } ?: "OpenWrt"
     val model = board?.optString("model", "Маршрутизатор")?.ifBlank { "Маршрутизатор" } ?: "Маршрутизатор"
     val cpu = s.cpuPercent
@@ -1907,12 +1917,12 @@ private fun ProcessesScreen(output: String?, onRefresh: () -> Unit) {
                 Text("Процессы роутера", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, contentDescription = "Обновить процессы") }
             }
-            Text("Снимок top и список процессов ps.", style = MaterialTheme.typography.bodySmall,
+            Text("Снимок top и список процессов ps. Если RPC-команды запрещены ACL роутера, причина будет показана вместо пустого списка.", style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         item {
             InfoCard("Загрузка системы · top") {
-                Text(top.ifBlank { "Нет данных top." },
+                Text(top.ifBlank { "Нет данных top. Нажми «Обновить» или проверь доступ file.exec." },
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                     style = MaterialTheme.typography.bodySmall)
             }
