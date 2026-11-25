@@ -424,10 +424,13 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                                 mergedServices.put(name, merged)
                             }
                             val topResult = runCatching { client.execReadOnly("top", listOf("-b", "-n", "1")) }
-                            val psResult = runCatching { client.execReadOnly("ps") }
+                            val topText = topResult.getOrNull()?.takeIf { it.isNotBlank() }
+                                ?: runCatching { client.execReadOnly("busybox", listOf("top", "-b", "-n", "1")) }
+                                    .getOrElse { topResult.exceptionOrNull()?.let { error -> "Не удалось получить top: ${error.message}; busybox top: ${it.message}" } ?: "Команда top не вернула данные: ${it.message}" }
+                            val psResult = runCatching { client.execReadOnly("ps", listOf("-o", "pid,comm,rss")) }
+                                .recoverCatching { client.execReadOnly("ps") }
                                 .recoverCatching { client.execReadOnly("ps", listOf("w")) }
-                            val topText = topResult.getOrElse { "Не удалось получить top: ${it.message}" }
-                            val psText = psResult.getOrElse { "Не удалось получить список ps: ${it.message}" }
+                            val psText = psResult.getOrElse { "Не удалось получить список процессов ps: ${it.message}" }
                             val processOutput = topText + "\n--ROUTERDASH-PS--\n" + psText
                             val serviceDiagnostics = buildList {
                                 if (initNames.isEmpty()) add("Не удалось получить полный список /etc/init.d; отображены только службы, возвращённые ubus.")
