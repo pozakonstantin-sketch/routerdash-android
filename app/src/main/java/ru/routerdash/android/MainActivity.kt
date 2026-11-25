@@ -310,7 +310,26 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                             val diagnostic = if (mounts.length() == 0)
                                 failures.joinToString("\n").ifBlank { "Роутер не вернул список файловых систем." }
                             else null
-                            val diskDetails = runCatching { client.execReadOnly("sh", listOf("-c", "echo BLOCK_INFO; block info 2>/dev/null; echo BLOCK_DEVICES; ls /sys/block; echo BLOCK_SIZES_SECTORS; cat /sys/block/*/size 2>/dev/null; echo DISK_STATS; cat /proc/diskstats; echo MOUNTS; grep -E \"/mnt|/overlay|/rom\" /proc/mounts; echo DF; df -h")) }.getOrDefault("Диагностика дисков недоступна")
+                            val mountOutput = runCatching { client.execReadOnly("mount") }.getOrDefault("")
+                            val mountedPaths = parseMountCommandOutput(mountOutput)
+                            val knownMounts = (0 until mounts.length()).mapNotNull { mounts.optJSONObject(it)?.optString("mount") }.toSet()
+                            mountedPaths.forEach { item ->
+                                if (item.optString("mount") !in knownMounts) mounts.put(item)
+                            }
+                            val diskDetails = buildString {
+                                append("BLOCK INFO\\n")
+                                append(runCatching { client.execReadOnly("block", listOf("info")) }.getOrElse { "Недоступно: ${it.message}" })
+                                append("\\n\\nФИЗИЧЕСКИЕ УСТРОЙСТВА\\n")
+                                append(runCatching { client.execReadOnly("ls", listOf("-l", "/dev")) }.getOrElse { "Недоступно: ${it.message}" })
+                                append("\\n\\nРАЗДЕЛЫ /SYS/BLOCK\\n")
+                                append(runCatching { client.execReadOnly("ls", listOf("-1", "/sys/block")) }.getOrElse { "Недоступно: ${it.message}" })
+                                append("\\n\\nDISKSTATS\\n")
+                                append(runCatching { client.execReadOnly("cat", listOf("/proc/diskstats")) }.getOrElse { "Недоступно: ${it.message}" })
+                                append("\\n\\nMOUNT\\n")
+                                append(mountOutput.ifBlank { "Нет данных" })
+                                append("\\n\\nDF -H\\n")
+                                append(runCatching { client.execReadOnly("df", listOf("-h")) }.getOrElse { "Недоступно: ${it.message}" })
+                            }
                             snapshot.copy(storage = mounts, storageError = diagnostic, diskDetails = diskDetails)
                         }
                         Screen.PACKAGES -> snapshot.copy(packages = client.call("rpc-sys", "packagelist"))
@@ -1436,6 +1455,21 @@ private fun parseDfOutput(output: String): JSONArray {
         rows.put(JSONObject().put("device", parts[0]).put("mount", parts.last())
             .put("size", blockSize * 1024L).put("used", used * 1024L)
             .put("avail", available * 1024L))
+    }
+    return rows
+}
+
+private fun parseMountCommandOutput(output: String): JSONArray {
+    val rows = JSONArray()
+    val seen = mutableSetOf<String>()
+    output.lineSequence().forEach { line ->
+        val match = Regex("^(.+?) on (.+?) type ").find(line.trim()) ?: return@forEach
+        val device = match.groupValues[1].trim()
+        val mount = match.groupValues[2].trim()
+        if (mount.startsWith("/") && seen.add(mount)) {
+            rows.put(JSONObject().put("device", device).put("mount", mount)
+                .put("size", 0L).put("used", 0L).put("avail", 0L))
+        }
     }
     return rows
 }
