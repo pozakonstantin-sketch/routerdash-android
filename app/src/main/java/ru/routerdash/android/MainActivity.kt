@@ -196,7 +196,7 @@ private data class TrafficPoint(val rx: Long, val tx: Long)
 private data class Snapshot(
     val board: JSONObject? = null, val info: JSONObject? = null,
     val network: JSONObject? = null, val wireless: JSONObject? = null, val devices: JSONObject? = null,
-    val services: JSONObject? = null, val logs: JSONObject? = null,
+    val services: JSONObject? = null, val serviceDiagnostics: String? = null, val logs: JSONObject? = null,
     val storage: JSONArray? = null, val storageError: String? = null,
     val packages: JSONObject? = null, val downloads: JSONObject? = null,
     val vpnStatus: String? = null, val diskDetails: String? = null, val firewallRules: String? = null,
@@ -393,13 +393,19 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                             "echo VPN_PROCESS_STATS; top -bn1 2>/dev/null | head -n 25; echo ROUTES; ip route 2>/dev/null | head -n 15; echo VPN_LOGS; logread 2>/dev/null | grep -iE \"tailscale|sing-box|vless|wireguard|openvpn\" | tail -n 25 || true")))
                         Screen.SERVICES, Screen.PROCESSES -> {
                             // /etc/init.d is the authoritative inventory; ubus supplies runtime state.
-                            val rcServices = runCatching { client.call("rc", "list") }.getOrDefault(JSONObject())
-                            val initServices = runCatching { client.call("luci", "getInitList") }.getOrNull()
+                            val serviceFailures = mutableListOf<String>()
+                            val rcServices = runCatching { client.call("rc", "list") }
+                                .onFailure { serviceFailures += "rc.list: ${it.message}" }
+                                .getOrDefault(JSONObject())
+                            val initServices = runCatching { client.call("luci", "getInitList") }
+                                .onFailure { serviceFailures += "luci.getInitList: ${it.message}" }
+                                .getOrNull()
                             val initNames = runCatching {
                                 client.execReadOnly("ls", listOf("-1", "/etc/init.d"))
                                     .lineSequence().map { it.trim() }
                                     .filter { it.matches(Regex("[A-Za-z0-9_.-]+")) }.toList()
-                            }.getOrDefault(emptyList())
+                            }.onFailure { serviceFailures += "ls /etc/init.d: ${it.message}" }
+                                .getOrDefault(emptyList())
                             val mergedServices = JSONObject()
                             val serviceNames = linkedSetOf<String>()
                             initNames.forEach { serviceNames += it }
@@ -419,7 +425,12 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                             val topText = topResult.getOrElse { "Не удалось получить top: ${it.message}" }
                             val psText = psResult.getOrElse { "Не удалось получить список ps: ${it.message}" }
                             val processOutput = topText + "\n--ROUTERDASH-PS--\n" + psText
-                            snapshot.copy(services = mergedServices, processes = processOutput)
+                            val serviceDiagnostics = buildList {
+                                if (initNames.isEmpty()) add("Не удалось получить полный список /etc/init.d; отображены только службы, возвращённые ubus.")
+                                if (serviceNames.size < 10) add("Получено только ${serviceNames.size} имён служб; ожидается полный системный список.")
+                                addAll(serviceFailures)
+                            }.joinToString("\n").ifBlank { null }
+                            snapshot.copy(services = mergedServices, serviceDiagnostics = serviceDiagnostics, processes = processOutput)
                         }
                         Screen.LOGS -> {
                             val args = JSONObject().put("lines", 300)
@@ -679,7 +690,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                         Screen.STORAGE -> StorageScreen(snapshot.storage, snapshot.storageError, snapshot.diskDetails) { refresh(Screen.STORAGE) }
                         Screen.PACKAGES -> PackagesScreen(snapshot.packages) { refresh(Screen.PACKAGES) }
                         Screen.DOWNLOADS -> DownloadsScreen(snapshot.downloads, api) { refresh(Screen.DOWNLOADS) }
-                        Screen.SERVICES -> ServicesScreen(snapshot.services, snapshot.processes, api) { refresh(Screen.SERVICES) }
+                        Screen.SERVICES -> ServicesScreen(snapshot.services, snapshot.processes, snapshot.serviceDiagnostics, api) { refresh(Screen.SERVICES) }
                         Screen.PROCESSES -> ProcessesScreen(snapshot.processes) { refresh(Screen.PROCESSES) }
                         Screen.VPN -> VpnScreen(snapshot.vpnStatus) { refresh(Screen.VPN) }
                         Screen.FIREWALL -> FirewallScreen(snapshot.firewallRules) { refresh(Screen.FIREWALL) }
@@ -1808,7 +1819,7 @@ private fun DownloadsScreen(result: JSONObject?, api: RouterApi?, onRefresh: () 
 }
 
 @Composable
-private fun ServicesScreen(result: JSONObject?, processes: String?, api: RouterApi?, onRefresh: () -> Unit) {
+private fun ServicesScreen(result: JSONObject?, processes: String?, diagnostics: String?, api: RouterApi?, onRefresh: () -> Unit) {
     val names = result?.keys()?.asSequence()?.toList()?.sorted() ?: emptyList()
     val scope = rememberCoroutineScope()
     var busyService by remember { mutableStateOf<String?>(null) }
@@ -1854,10 +1865,17 @@ private fun ServicesScreen(result: JSONObject?, processes: String?, api: RouterA
                     Icon(Icons.Outlined.Refresh, contentDescription = "Обновить список")
                 }
             }
+            Text("${names.size} служб получено", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (message != null) Text(message!!, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 6.dp))
         }
-        if (names.isEmpty()) item { EmptyState("Нет данных о службах. Проверь доступ к ubus rc.list.") }
+        if (!diagnostics.isNullOrBlank()) item {
+            InfoCard("Неполный список служб") {
+                Text(diagnostics, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        if (names.isEmpty()) item { EmptyState("Нет данных о службах. Проверь доступ к ubus rc.list и file.exec.") }
         else items(names) { name ->
             val service = result?.optJSONObject(name) ?: JSONObject()
             val hasRuntimeState = service.has("running")
