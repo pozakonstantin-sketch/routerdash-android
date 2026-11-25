@@ -243,11 +243,14 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                 snapshot = withContext(Dispatchers.IO) {
                     when (screen) {
                         Screen.OVERVIEW -> snapshot.copy(
-                            board = client.call("system", "board"),
-                            info = client.call("system", "info"),
-                            loadAverageRaw = runCatching { readUbusFile(client, "/proc/loadavg") }.getOrNull(),
-                            temperatureC = readRouterTemperature(client),
+                            board = runCatching { client.call("system", "board") }.getOrDefault(JSONObject()),
+                            info = runCatching { client.call("system", "info") }.getOrDefault(JSONObject()),
+                            loadAverageRaw = runCatching { readUbusFile(client, "/proc/loadavg") }.getOrNull()
+                                ?.takeIf { parseLoadAverage(it) != null }
+                                ?: runCatching { sshSession?.execReadOnly("cat /proc/loadavg") }.getOrNull(),
+                            temperatureC = readRouterTemperature(client, sshSession),
                             cpuRaw = runCatching { readUbusFile(client, "/proc/stat") }.getOrNull()?.takeIf { it.contains("cpu ") }
+                                ?: runCatching { sshSession?.execReadOnly("cat /proc/stat") }.getOrNull()
                                 ?: runCatching { client.execReadOnly("cat", listOf("/proc/stat")) }.getOrNull(),
                             networkDevices = client.call("luci-rpc", "getNetworkDevices"),
                             storage = runCatching { parseDfOutput(client.execReadOnly("df", listOf("-kP"))) }.getOrNull()
@@ -256,9 +259,9 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                             vpnStatus = runCatching {
                                 client.execReadOnly("sh", listOf("-c",
                                     "echo VPN_PROCESSES; ps | grep -E \"tailscale|sing-box|xray|openvpn|wireguard\" | grep -v grep; " +
-                                    "echo TAILSCALE_STATUS; if command -v tailscale >/dev/null 2>&1; then tailscale status 2>&1 | head -n 10; echo TAILSCALE_IP; tailscale ip -4 2>&1; fi; echo SING_BOX_VERSION; sing-box version 2>&1 | head -n 2; " +
-                                    "echo TUNNEL_INTERFACES; ip -o addr 2>/dev/null | grep -E \"tailscale|tun|wg|sing\" || true; echo VPN_PROCESS_STATS; top -bn1 2>/dev/null | head -n 25"))
-                            }.getOrDefault("Не удалось получить состояние VPN")
+                                    "echo TUNNEL_INTERFACES; ip -o addr 2>/dev/null | grep -E \"tailscale|tun|wg|sing\" || true"))
+                            }.getOrNull()?.takeIf { it.isNotBlank() }
+                                ?: readVpnDiagnostics(sshSession)
                         )
                         Screen.NETWORK -> {
                             val ifaceDump = client.call("network.interface", "dump")
@@ -425,11 +428,13 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                             }
                             snapshot.copy(firewallRules = firewallText)
                         }
-                        Screen.VPN -> snapshot.copy(vpnStatus = client.execReadOnly("sh", listOf("-c",
-                            "echo VPN_PROCESSES; ps | grep -E \"tailscale|sing-box|xray|openvpn|wireguard\" | grep -v grep; " +
-                            "echo TAILSCALE_STATUS; if command -v tailscale >/dev/null 2>&1; then tailscale status 2>&1 | head -n 30; echo TAILSCALE_IP; tailscale ip -4 2>&1; fi; echo SING_BOX_VERSION; sing-box version 2>&1 | head -n 2; " +
-                            "echo TUNNEL_INTERFACES; ip -o addr 2>/dev/null | grep -E \"tailscale|tun|wg|sing\" || true; " +
-                            "echo VPN_PROCESS_STATS; top -bn1 2>/dev/null | head -n 25; echo ROUTES; ip route 2>/dev/null | head -n 15; echo VPN_LOGS; logread 2>/dev/null | grep -iE \"tailscale|sing-box|vless|wireguard|openvpn\" | tail -n 25 || true")))
+                        Screen.VPN -> {
+                            val rpcVpn = runCatching { client.execReadOnly("sh", listOf("-c",
+                                "echo VPN_PROCESSES; ps | grep -E \"tailscale|sing-box|xray|openvpn|wireguard\" | grep -v grep; " +
+                                "echo TUNNEL_INTERFACES; ip -o addr 2>/dev/null | grep -E \"tailscale|tun|wg|sing\" || true")) }
+                                .getOrNull()?.takeIf { it.isNotBlank() }
+                            snapshot.copy(vpnStatus = rpcVpn ?: readVpnDiagnostics(sshSession))
+                        }
                         Screen.SERVICES, Screen.PROCESSES -> {
                             // /etc/init.d is the authoritative inventory; ubus supplies runtime state.
                             val serviceFailures = mutableListOf<String>()
@@ -2508,7 +2513,10 @@ internal class SshTerminal(private val context: android.content.Context) {
     fun execReadOnly(command: String): String {
         val allowed = setOf("top -b -n 1", "busybox top -b -n 1", "ps -o pid,comm,rss", "ps", "ps w",
             "df -kP", "df -h", "mount", "cat /proc/mounts", "cat /proc/diskstats", "block info",
-            "ls -l /dev", "ls -1 /sys/block", "ls -1 /etc/init.d")
+            "ls -l /dev", "ls -1 /sys/block", "ls -1 /etc/init.d",
+            "cat /proc/loadavg", "cat /proc/stat",
+            "cat /sys/class/thermal/thermal_zone0/temp", "cat /sys/class/hwmon/hwmon0/temp1_input",
+            "ip -o addr", "ip route", "tailscale status", "tailscale ip -4", "wg show", "sing-box version")
         require(command in allowed) { "Команда не входит в список разрешённых диагностических операций." }
         val active = session ?: throw IllegalStateException("SSH-сессия не открыта.")
         check(active.isConnected) { "SSH-соединение потеряно. Подключись заново." }
@@ -2817,12 +2825,40 @@ internal fun parseTemperatureC(raw: String?): Double? {
     return celsius.takeIf { it in -20.0..150.0 }
 }
 
-private fun readRouterTemperature(api: RouterApi): Double? {
-    for (path in listOf("/sys/class/thermal/thermal_zone0/temp", "/sys/class/hwmon/hwmon0/temp1_input")) {
-        val parsed = parseTemperatureC(runCatching { readUbusFile(api, path) }.getOrNull())
+private fun readRouterTemperature(api: RouterApi, ssh: SshTerminal?): Double? {
+    val paths = listOf("/sys/class/thermal/thermal_zone0/temp", "/sys/class/hwmon/hwmon0/temp1_input")
+    for (path in paths) {
+        val rpcValue = runCatching { readUbusFile(api, path) }.getOrNull()
+        val sshValue = if (rpcValue.isNullOrBlank()) runCatching { ssh?.execReadOnly("cat $path") }.getOrNull() else null
+        val parsed = parseTemperatureC(rpcValue ?: sshValue)
         if (parsed != null) return parsed
     }
     return null
+}
+
+private fun readVpnDiagnostics(ssh: SshTerminal?): String {
+    if (ssh == null) return "Нет данных VPN: подключи SSH в разделе «SSH-терминал»."
+    fun read(command: String): String = runCatching { ssh.execReadOnly(command).trim() }.getOrDefault("")
+    val processes = read("ps").lineSequence()
+        .filter { Regex("tailscaled|sing-box|xray|openvpn|wireguard").containsMatchIn(it) }
+        .toList().joinToString("\n")
+    val addresses = read("ip -o addr")
+    val routes = read("ip route")
+    val tailscale = read("tailscale status")
+    val tailscaleIp = read("tailscale ip -4")
+    val wireguard = read("wg show")
+    val singBox = read("sing-box version")
+    val sections = listOf(
+        "VPN-процессы" to processes,
+        "VPN-интерфейсы и адреса" to addresses.lineSequence().filter { Regex("tailscale|tun[0-9]*|wg[0-9]*").containsMatchIn(it) }.joinToString("\n"),
+        "Маршруты" to routes.lineSequence().filter { Regex("tailscale|tun|wg").containsMatchIn(it) }.joinToString("\n"),
+        "Tailscale status" to tailscale,
+        "Tailscale IPv4" to tailscaleIp,
+        "WireGuard" to wireguard,
+        "sing-box" to singBox
+    ).filter { it.second.isNotBlank() }
+    return if (sections.isEmpty()) "Не удалось получить подтверждённые сведения о VPN через SSH."
+        else sections.joinToString("\n\n") { (title, value) -> "$title:\n$value" }
 }
 
 internal fun normalizeServiceInventory(vararg sources: JSONObject?): JSONObject {
