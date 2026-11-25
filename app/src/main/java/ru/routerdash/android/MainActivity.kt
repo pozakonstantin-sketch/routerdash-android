@@ -78,12 +78,13 @@ private fun RouterDashIcon(index: Int, description: String?, modifier: Modifier 
 class MainActivity : FragmentActivity() {
     private val securityPrefs by lazy { getSharedPreferences("routerdash_security", MODE_PRIVATE) }
     private val biometricUnlockSignal = androidx.compose.runtime.mutableIntStateOf(0)
+    private val pickedSyncFolderUri = androidx.compose.runtime.mutableStateOf<String?>(null)
     private var shouldAuthenticate = true
     private var promptVisible = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { RouterDashApp(biometricUnlockSignal.intValue, onEnableBiometric = { onEnabled -> enableBiometricLock(onEnabled) }) }
+        setContent { RouterDashApp(biometricUnlockSignal.intValue, pickedSyncFolderUri.value, { pickSyncFolder() }, onEnableBiometric = { onEnabled -> enableBiometricLock(onEnabled) }) }
     }
 
     override fun onStart() {
@@ -96,6 +97,30 @@ class MainActivity : FragmentActivity() {
     override fun onStop() {
         super.onStop()
         if (securityPrefs.getBoolean("biometric_enabled", false)) shouldAuthenticate = true
+    }
+
+    private val syncFolderRequestCode = 0x5244
+
+    private fun pickSyncFolder() {
+        val intent = android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                android.content.Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        // Keep the request code in the platform's supported 16-bit range.
+        startActivityForResult(intent, syncFolderRequestCode)
+    }
+
+    @Deprecated("Deprecated in Android API; bounded request code avoids registry overflow on affected devices")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == syncFolderRequestCode && resultCode == RESULT_OK) {
+            val uri = data?.data ?: return
+            val grantFlags = data.flags and
+                (android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            runCatching { contentResolver.takePersistableUriPermission(uri, grantFlags) }
+            pickedSyncFolderUri.value = uri.toString()
+        }
     }
 
     private fun enableBiometricLock(onEnabled: () -> Unit) {
@@ -165,18 +190,18 @@ class MainActivity : FragmentActivity() {
 }
 
 private enum class Screen(val title: String) {
-    OVERVIEW("Обзор"), NETWORK("Сеть"), DEVICES("Устройства"), STORAGE("Диски"), PACKAGES("Пакеты"), DOWNLOADS("Загрузки"), SERVICES("Службы"), VPN("VPN"), FIREWALL("Firewall"), SSH("SSH-терминал"), SYNC("Синхронизация"), LOGS("Журнал"), SETTINGS("Настройки")
+    OVERVIEW("Обзор"), NETWORK("Сеть"), DEVICES("Устройства"), STORAGE("Диски"), PACKAGES("Пакеты"), DOWNLOADS("Загрузки"), SERVICES("Службы"), VPN("VPN"), FIREWALL("Firewall"), PROCESSES("Процессы"), SSH("SSH-терминал"), SYNC("Синхронизация"), LOGS("Журнал"), SETTINGS("Настройки")
 }
 private data class TrafficPoint(val rx: Long, val tx: Long)
 private data class Snapshot(
     val board: JSONObject? = null, val info: JSONObject? = null,
     val network: JSONObject? = null, val wireless: JSONObject? = null, val devices: JSONObject? = null,
-    val services: JSONObject? = null, val logs: JSONObject? = null,
-    val storage: JSONArray? = null, val storageError: String? = null,
-    val packages: JSONObject? = null, val downloads: JSONObject? = null,
+    val services: JSONObject? = null, val serviceDiagnostics: String? = null, val logs: JSONObject? = null,
+    val storage: JSONArray? = null, val storageError: String? = null,    val packages: JSONObject? = null, val downloads: JSONObject? = null,
     val vpnStatus: String? = null, val diskDetails: String? = null, val firewallRules: String? = null,
     val cpuRaw: String? = null, val networkDevices: JSONObject? = null,
     val processes: String? = null, val logsError: String? = null,
+    val loadAverageRaw: String? = null, val temperatureC: Double? = null,
     val cpuPercent: Int? = null, val rxRate: Long? = null, val txRate: Long? = null,
     val trafficHistory: List<TrafficPoint> = emptyList(),
     val cpuHistory: List<Int> = emptyList()
@@ -184,7 +209,7 @@ private data class Snapshot(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> Unit) -> Unit) {
+private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: String?, onPickSyncFolder: () -> Unit, onEnableBiometric: (() -> Unit) -> Unit) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("routerdash", 0) }
     val scope = rememberCoroutineScope()
@@ -217,18 +242,25 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                 snapshot = withContext(Dispatchers.IO) {
                     when (screen) {
                         Screen.OVERVIEW -> snapshot.copy(
-                            board = client.call("system", "board"),
-                            info = client.call("system", "info"),
+                            board = runCatching { client.call("system", "board") }.getOrDefault(JSONObject()),
+                            info = runCatching { client.call("system", "info") }.getOrDefault(JSONObject()),
+                            loadAverageRaw = runCatching { readUbusFile(client, "/proc/loadavg") }.getOrNull()
+                                ?.takeIf { parseLoadAverage(it) != null }
+                                ?: runCatching { sshSession?.execReadOnly("cat /proc/loadavg") }.getOrNull(),
+                            temperatureC = readRouterTemperature(client, sshSession),
                             cpuRaw = runCatching { readUbusFile(client, "/proc/stat") }.getOrNull()?.takeIf { it.contains("cpu ") }
+                                ?: runCatching { sshSession?.execReadOnly("cat /proc/stat") }.getOrNull()
                                 ?: runCatching { client.execReadOnly("cat", listOf("/proc/stat")) }.getOrNull(),
                             networkDevices = client.call("luci-rpc", "getNetworkDevices"),
-                            storage = runCatching { parseDfOutput(client.execReadOnly("df", listOf("-kP"))) }.getOrNull(),
+                            storage = runCatching { parseDfOutput(client.execReadOnly("df", listOf("-kP"))) }.getOrNull()
+                                ?.takeIf { it.length() > 0 }
+                                ?: runCatching { sshSession?.execReadOnly("df -kP")?.let(::parseDfOutput) }.getOrNull(),
                             vpnStatus = runCatching {
                                 client.execReadOnly("sh", listOf("-c",
                                     "echo VPN_PROCESSES; ps | grep -E \"tailscale|sing-box|xray|openvpn|wireguard\" | grep -v grep; " +
-                                    "echo TAILSCALE_STATUS; if command -v tailscale >/dev/null 2>&1; then tailscale status 2>&1 | head -n 10; echo TAILSCALE_IP; tailscale ip -4 2>&1; fi; echo SING_BOX_VERSION; sing-box version 2>&1 | head -n 2; " +
-                                    "echo TUNNEL_INTERFACES; ip -o addr 2>/dev/null | grep -E \"tailscale|tun|wg|sing\" || true; echo VPN_PROCESS_STATS; top -bn1 2>/dev/null | head -n 25"))
-                            }.getOrDefault("Не удалось получить состояние VPN")
+                                    "echo TUNNEL_INTERFACES; ip -o addr 2>/dev/null | grep -E \"tailscale|tun|wg|sing\" || true"))
+                            }.getOrNull()?.takeIf { it.isNotBlank() }
+                                ?: readVpnDiagnostics(sshSession)
                         )
                         Screen.NETWORK -> {
                             val ifaceDump = client.call("network.interface", "dump")
@@ -289,6 +321,9 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                                 mounts = runCatching { parseProcMounts(readUbusFile(client, "/proc/mounts").orEmpty()) }
                                     .onFailure { failures += "/proc/mounts: ${it.message}" }.getOrDefault(JSONArray())
                             }
+                            // SSH fallback is only used after an explicit connection in the SSH screen.
+                            val sshDf = runCatching { sshSession?.execReadOnly("df -kP") }.getOrNull().orEmpty()
+                            if (mounts.length() == 0 && sshDf.isNotBlank()) mounts = parseDfOutput(sshDf)
                             // Match LuCI's own storage page: system.info provides root and tmp
                             // capacities in KiB, while luci.getMountPoints provides mounted volumes in bytes.
                             runCatching {
@@ -307,26 +342,143 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                                     }
                                 }
                             }
-                            val diagnostic = if (mounts.length() == 0)
-                                failures.joinToString("\n").ifBlank { "Роутер не вернул список файловых систем." }
-                            else null
-                            val diskDetails = runCatching { client.execReadOnly("sh", listOf("-c", "echo BLOCK_INFO; block info 2>/dev/null; echo BLOCK_DEVICES; ls /sys/block; echo BLOCK_SIZES_SECTORS; cat /sys/block/*/size 2>/dev/null; echo DISK_STATS; cat /proc/diskstats; echo MOUNTS; grep -E \"/mnt|/overlay|/rom\" /proc/mounts; echo DF; df -h")) }.getOrDefault("Диагностика дисков недоступна")
+                            fun readDiagnostic(label: String, command: String, args: List<String> = emptyList(), sshCommand: String = command + if (args.isEmpty()) "" else " " + args.joinToString(" ")): String {
+                                val rpc = runCatching { client.execReadOnly(command, args) }
+                                if (rpc.isSuccess && rpc.getOrNull().orEmpty().isNotBlank()) return rpc.getOrThrow()
+                                val ssh = runCatching { sshSession?.execReadOnly(sshCommand) }
+                                val sshOutput = ssh.getOrNull().orEmpty()
+                                if (sshOutput.isNotBlank()) return sshOutput
+                                val reason = rpc.exceptionOrNull()?.message ?: "пустой ответ"
+                                failures += "$label: $reason" + (ssh.exceptionOrNull()?.message?.let { "; SSH: $it" } ?: "")
+                                return "Недоступно: $reason"
+                            }
+                            val mountOutput = readDiagnostic("mount", "mount")
+                            val mountedPaths = parseMountCommandOutput(mountOutput)
+                            val knownMounts = (0 until mounts.length()).mapNotNull { mounts.optJSONObject(it)?.optString("mount") }.toSet()
+                            for (mountIndex in 0 until mountedPaths.length()) {
+                                val item = mountedPaths.optJSONObject(mountIndex) ?: continue
+                                if (item.optString("mount") !in knownMounts) mounts.put(item)
+                            }
+                            val blockInfo = readDiagnostic("block info", "block", listOf("info"))
+                            val deviceList = readDiagnostic("ls /dev", "ls", listOf("-l", "/dev"))
+                            val sysBlock = readDiagnostic("ls /sys/block", "ls", listOf("-1", "/sys/block"))
+                            val diskStats = readDiagnostic("/proc/diskstats", "cat", listOf("/proc/diskstats"))
+                            val dfHuman = readDiagnostic("df -h", "df", listOf("-h"))
+                            // Always merge df metrics, even when LuCI returned only root/tmp.
+                            val dfOutput = readDiagnostic("df -kP (метрики файловых систем)", "df", listOf("-kP"))
+                            val dfRows = if (dfOutput.startsWith("Недоступно:")) JSONArray() else parseDfOutput(dfOutput)
+                            val mountIndexes = mutableMapOf<String, Int>()
+                            for (index in 0 until mounts.length()) {
+                                val path = mounts.optJSONObject(index)?.optString("mount").orEmpty()
+                                if (path.isNotBlank()) mountIndexes[path] = index
+                            }
+                            for (index in 0 until dfRows.length()) {
+                                val row = dfRows.optJSONObject(index) ?: continue
+                                val path = row.optString("mount")
+                                val existingIndex = mountIndexes[path]
+                                if (existingIndex == null) {
+                                    mounts.put(row)
+                                    mountIndexes[path] = mounts.length() - 1
+                                } else {
+                                    val existing = mounts.optJSONObject(existingIndex) ?: JSONObject()
+                                    listOf("device", "size", "used", "avail").forEach { key ->
+                                        if (row.has(key)) existing.put(key, row.opt(key))
+                                    }
+                                    mounts.put(existingIndex, existing)
+                                }
+                            }
+                            val knownAfterMerge = (0 until mounts.length()).mapNotNull { mounts.optJSONObject(it)?.optString("mount") }.toSet()
+                            if ("/mnt/sda" !in knownAfterMerge && "/mnt/sda1" !in knownAfterMerge) {
+                                failures += "SSD /mnt/sda не обнаружен среди точек монтирования."
+                            }
+                            val diagnostic = failures.joinToString("\n").ifBlank { null }
+                            val diskDetails = buildString {
+                                append("BLOCK INFO\n"); append(blockInfo)
+                                append("\n\nФИЗИЧЕСКИЕ УСТРОЙСТВА\n"); append(deviceList)
+                                append("\n\nРАЗДЕЛЫ /SYS/BLOCK\n"); append(sysBlock)
+                                append("\n\nDISKSTATS\n"); append(diskStats)
+                                append("\n\nMOUNT\n"); append(mountOutput.ifBlank { "Нет данных" })
+                                append("\n\nDF -H\n"); append(dfHuman)
+                            }
                             snapshot.copy(storage = mounts, storageError = diagnostic, diskDetails = diskDetails)
                         }
                         Screen.PACKAGES -> snapshot.copy(packages = client.call("rpc-sys", "packagelist"))
                         Screen.DOWNLOADS -> snapshot.copy(downloads = client.aria2Overview())
-                        Screen.FIREWALL -> snapshot.copy(firewallRules = runCatching { client.execReadOnly("sh", listOf("-c", "echo UCI_FIREWALL; uci show firewall 2>/dev/null; echo NFT_RULESET; nft list ruleset 2>/dev/null | head -n 260")) }.getOrDefault("Не удалось прочитать правила firewall"))
-                        Screen.VPN -> snapshot.copy(vpnStatus = client.execReadOnly("sh", listOf("-c",
-                            "echo VPN_PROCESSES; ps | grep -E \"tailscale|sing-box|xray|openvpn|wireguard\" | grep -v grep; " +
-                            "echo TAILSCALE_STATUS; if command -v tailscale >/dev/null 2>&1; then tailscale status 2>&1 | head -n 30; echo TAILSCALE_IP; tailscale ip -4 2>&1; fi; echo SING_BOX_VERSION; sing-box version 2>&1 | head -n 2; " +
-                            "echo TUNNEL_INTERFACES; ip -o addr 2>/dev/null | grep -E \"tailscale|tun|wg|sing\" || true; " +
-                            "echo VPN_PROCESS_STATS; top -bn1 2>/dev/null | head -n 25; echo ROUTES; ip route 2>/dev/null | head -n 15; echo VPN_LOGS; logread 2>/dev/null | grep -iE \"tailscale|sing-box|vless|wireguard|openvpn\" | tail -n 25 || true")))
-                        Screen.SERVICES -> snapshot.copy(
-                            services = client.call("rc", "list"),
-                            processes = runCatching { client.execReadOnly("top", listOf("-bn1")) }.getOrDefault("") +
-                                "\n--ROUTERDASH-PS--\n" +
-                                runCatching { client.execReadOnly("ps", listOf("-o", "pid,comm,rss")) }.getOrDefault("")
-                        )
+                        Screen.FIREWALL -> {
+                            // Use rpcd UCI API and invoke nft directly. Never pass arbitrary shell
+                            // text to file.exec: a shell executable in a read ACL is a security risk.
+                            val uciResult = runCatching {
+                                client.call("uci", "get", JSONObject().put("config", "firewall")).toString(2)
+                            }
+                            val nftResult = runCatching {
+                                client.execReadOnly("nft", listOf("list", "ruleset"))
+                            }
+                            val statusResult = if (nftResult.isFailure) runCatching {
+                                client.call("firewall", "status").toString(2)
+                            } else Result.success("")
+                            val firewallText = buildString {
+                                append("UCI_FIREWALL\n")
+                                append(uciResult.getOrElse { "Ошибка чтения UCI firewall: ${it.message}" })
+                                append("\nNFT_RULESET\n")
+                                append(nftResult.getOrElse {
+                                    val status = statusResult.getOrNull().orEmpty()
+                                    if (status.isNotBlank()) "nft недоступен через file.exec. Статус firewall:\n$status"
+                                    else "Ошибка чтения nftables: ${it.message}"
+                                })
+                            }
+                            snapshot.copy(firewallRules = firewallText)
+                        }
+                        Screen.VPN -> {
+                            val rpcVpn = runCatching { client.execReadOnly("sh", listOf("-c",
+                                "echo VPN_PROCESSES; ps | grep -E \"tailscale|sing-box|xray|openvpn|wireguard\" | grep -v grep; " +
+                                "echo TUNNEL_INTERFACES; ip -o addr 2>/dev/null | grep -E \"tailscale|tun|wg|sing\" || true")) }
+                                .getOrNull()?.takeIf { it.isNotBlank() }
+                            snapshot.copy(vpnStatus = rpcVpn ?: readVpnDiagnostics(sshSession))
+                        }
+                        Screen.SERVICES, Screen.PROCESSES -> {
+                            // /etc/init.d is the authoritative inventory; ubus supplies runtime state.
+                            val serviceFailures = mutableListOf<String>()
+                            val rcServices = runCatching { client.call("rc", "list") }
+                                .onFailure { serviceFailures += "rc.list: ${it.message}" }
+                                .getOrDefault(JSONObject())
+                            val initServices = runCatching { client.call("luci", "getInitList") }
+                                .onFailure { serviceFailures += "luci.getInitList: ${it.message}" }
+                                .getOrNull()
+                            val initNames = runCatching {
+                                client.execReadOnly("ls", listOf("-1", "/etc/init.d"))
+                                    .lineSequence().map { it.trim() }
+                                    .filter { it.matches(Regex("[A-Za-z0-9_.-]+")) }.toList()
+                            }.onFailure { serviceFailures += "ls /etc/init.d: ${it.message}" }
+                                .getOrDefault(emptyList())
+                            val sshInitNames = runCatching { sshSession?.execReadOnly("ls -1 /etc/init.d") }.getOrNull().orEmpty()
+                                .lineSequence().map { it.trim() }
+                                .filter { it.matches(Regex("[A-Za-z0-9_.-]+")) }.toList()
+                            val mergedServices = normalizeServiceInventory(rcServices, initServices)
+                            (initNames + sshInitNames).distinct().forEach { name ->
+                                if (!mergedServices.has(name)) mergedServices.put(name, JSONObject())
+                            }
+                            val serviceNames = mergedServices.keys().asSequence().toList().toSet()
+                            val topResult = runCatching { client.execReadOnly("top", listOf("-b", "-n", "1")) }
+                            val topRpc = topResult.getOrNull()?.takeIf { it.isNotBlank() }
+                                ?: runCatching { client.execReadOnly("busybox", listOf("top", "-b", "-n", "1")) }.getOrNull()
+                            val topSsh = if (topRpc.isNullOrBlank()) runCatching { sshSession?.execReadOnly("top -b -n 1") }.getOrNull() else null
+                            val topText = topRpc?.takeIf { it.isNotBlank() } ?: topSsh?.takeIf { it.isNotBlank() }
+                                ?: "Не удалось получить top: ${topResult.exceptionOrNull()?.message ?: "file.exec недоступен"}" +
+                                    if (sshSession == null) ". Подключи SSH в соответствующем разделе для получения процессов." else ""
+                            val psRpc = runCatching { client.execReadOnly("ps", listOf("-o", "pid,comm,rss")) }
+                                .recoverCatching { client.execReadOnly("ps") }
+                                .recoverCatching { client.execReadOnly("ps", listOf("w")) }.getOrNull()
+                            val psSsh = if (psRpc.isNullOrBlank()) runCatching { sshSession?.execReadOnly("ps -o pid,comm,rss") }.getOrNull() else null
+                            val psText = psRpc?.takeIf { it.isNotBlank() } ?: psSsh?.takeIf { it.isNotBlank() }
+                                ?: "Не удалось получить список процессов ps."
+                            val processOutput = topText + "\n--ROUTERDASH-PS--\n" + psText
+                            val serviceDiagnostics = buildList {
+                                if (initNames.isEmpty() && sshInitNames.isEmpty()) add("Полный список /etc/init.d недоступен через LuCI RPC. Подключи SSH в разделе «SSH-терминал», чтобы получить полный инвентарь без изменения ACL.")
+                                if (serviceNames.size < 10) add("Получено только ${serviceNames.size} имён служб; ожидается полный системный список.")
+                                addAll(serviceFailures)
+                            }.joinToString("\n").ifBlank { null }
+                            snapshot.copy(services = mergedServices, serviceDiagnostics = serviceDiagnostics, processes = processOutput)
+                        }
                         Screen.LOGS -> {
                             val args = JSONObject().put("lines", 300)
                             val failures = mutableListOf<String>()
@@ -445,8 +597,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                 runCatching { sshSession?.readAvailable().orEmpty() }.getOrDefault("")
             }
             if (chunk.isNotEmpty()) sshOutput = (sshOutput + chunk).takeLast(24000)
-            delay(250)
-        }
+            delay(250)        }
     }
 
     LaunchedEffect(connected, selected, refreshIntervalSeconds) {
@@ -539,6 +690,7 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                                 Screen.PACKAGES to 5,
                                 Screen.DOWNLOADS to 6,
                                 Screen.SERVICES to 7,
+                                Screen.PROCESSES to 14,
                                 Screen.VPN to 8,
                                 Screen.FIREWALL to 9,
                                 Screen.SSH to 10,
@@ -584,7 +736,8 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                         Screen.STORAGE -> StorageScreen(snapshot.storage, snapshot.storageError, snapshot.diskDetails) { refresh(Screen.STORAGE) }
                         Screen.PACKAGES -> PackagesScreen(snapshot.packages) { refresh(Screen.PACKAGES) }
                         Screen.DOWNLOADS -> DownloadsScreen(snapshot.downloads, api) { refresh(Screen.DOWNLOADS) }
-                        Screen.SERVICES -> ServicesScreen(snapshot.services, snapshot.processes, api) { refresh(Screen.SERVICES) }
+                        Screen.SERVICES -> ServicesScreen(snapshot.services, snapshot.processes, snapshot.serviceDiagnostics, api) { refresh(Screen.SERVICES) }
+                        Screen.PROCESSES -> ProcessesScreen(snapshot.processes) { refresh(Screen.PROCESSES) }
                         Screen.VPN -> VpnScreen(snapshot.vpnStatus) { refresh(Screen.VPN) }
                         Screen.FIREWALL -> FirewallScreen(snapshot.firewallRules) { refresh(Screen.FIREWALL) }
                         Screen.SYNC -> SyncScreen(
@@ -592,7 +745,9 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                             ssh = sshSession,
                             sshHostDefault = runCatching { URI(url).host ?: "192.168.1.1" }.getOrDefault("192.168.1.1"),
                             sshUserDefault = username,
-                            onOpenSsh = { selected = Screen.SSH }
+                            onOpenSsh = { selected = Screen.SSH },
+                            pickedFolderUri = pickedSyncFolderUri,
+                            onPickFolder = onPickSyncFolder
                         )
                         Screen.SSH -> SshScreen(
                             host = runCatching { URI(url).host ?: "192.168.1.1" }.getOrDefault("192.168.1.1"),
@@ -641,11 +796,11 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                         val destinations = listOf(
                             Screen.OVERVIEW to 1,
                             Screen.NETWORK to 2,
-                            Screen.DEVICES to 3,
-                            Screen.STORAGE to 4,
+                            Screen.DEVICES to 3,                            Screen.STORAGE to 4,
                             Screen.PACKAGES to 5,
                             Screen.DOWNLOADS to 6,
                             Screen.SERVICES to 7,
+                            Screen.PROCESSES to 14,
                             Screen.VPN to 8,
                             Screen.FIREWALL to 9,
                             Screen.SSH to 10,
@@ -796,7 +951,12 @@ private fun OverviewScreen(s: Snapshot) {
     val used = (total - available).coerceAtLeast(0L)
     val ramPercent = if (total > 0L) (used.toFloat() / total).coerceIn(0f, 1f) else 0f
     val uptime = info?.optLong("uptime")?.let { duration(it) } ?: "—"
-    val load = info?.optJSONArray("load")?.optLong(0)?.let { String.format("%.2f", it / 1000.0) } ?: "—"
+    val loadValues = info?.optJSONArray("load")
+    val load = parseLoadAverage(s.loadAverageRaw) ?: if (loadValues != null && loadValues.length() >= 3) {
+        (0..2).joinToString(" / ") { index ->
+            String.format(java.util.Locale.US, "%.2f", loadValues.optLong(index) / 65536.0)
+        }
+    } else "—"
     val hostname = board?.optString("hostname", "OpenWrt")?.ifBlank { "OpenWrt" } ?: "OpenWrt"
     val model = board?.optString("model", "Маршрутизатор")?.ifBlank { "Маршрутизатор" } ?: "Маршрутизатор"
     val cpu = s.cpuPercent
@@ -835,8 +995,7 @@ private fun OverviewScreen(s: Snapshot) {
         item(span = { GridItemSpan(maxLineSpan) }) {
             RouterStatusHero(hostname, model, health, healthColor, uptime)
         }
-        item {
-            GaugeCard("CPU", cpu?.let { "$it%" } ?: "—",
+        item {            GaugeCard("CPU", cpu?.let { "$it%" } ?: "—",
                 (cpu ?: 0) / 100f, "Процессор",
                 accent = androidx.compose.ui.graphics.Color(0xFFFF8A3D))
         }
@@ -856,6 +1015,10 @@ private fun OverviewScreen(s: Snapshot) {
                         androidx.compose.ui.graphics.Color(0xFFB58CFF), Modifier.weight(0.8f))
                 }
             }
+        }
+        item {
+            DashboardMiniCard("Температура CPU", s.temperatureC?.let { String.format(java.util.Locale.US, "%.1f °C", it) } ?: "Нет датчика",
+                "Датчик thermal/hwmon", androidx.compose.ui.graphics.Color(0xFFFFB454), Icons.Outlined.DeviceThermostat)
         }
         item {
             DashboardMiniCard("Диск / overlay", if (diskPercent >= 0) "${diskPercent}%" else "—",
@@ -1231,8 +1394,7 @@ private fun DevicesScreen(result: JSONObject?, wireless: JSONObject?) {
             }
         }
         merged.values.sortedWith(compareBy<Device> {
-            it.hostname == "Неизвестное устройство" || it.hostname == "Wi-Fi клиент"
-        }.thenBy { it.hostname })
+            it.hostname == "Неизвестное устройство" || it.hostname == "Wi-Fi клиент"        }.thenBy { it.hostname })
     }
     LazyColumn(contentPadding = PaddingValues(vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
         item {
@@ -1393,6 +1555,21 @@ private fun parseDfOutput(output: String): JSONArray {
     return rows
 }
 
+private fun parseMountCommandOutput(output: String): JSONArray {
+    val rows = JSONArray()
+    val seen = mutableSetOf<String>()
+    output.lineSequence().forEach { line ->
+        val match = Regex("^(.+?) on (.+?) type ").find(line.trim()) ?: return@forEach
+        val device = match.groupValues[1].trim()
+        val mount = match.groupValues[2].trim()
+        if (mount.startsWith("/") && seen.add(mount)) {
+            rows.put(JSONObject().put("device", device).put("mount", mount)
+                .put("size", 0L).put("used", 0L).put("avail", 0L))
+        }
+    }
+    return rows
+}
+
 private fun parseProcMounts(output: String): JSONArray {
     val rows = JSONArray()
     val seen = mutableSetOf<String>()
@@ -1417,7 +1594,6 @@ private fun normalizeLogResponse(response: JSONObject): JSONObject {
     if (text.isNotBlank()) return parseLogReadOutput(text)
     return JSONObject().put("log", entries)
 }
-
 private fun normalizeLogRows(source: JSONArray): JSONArray {
     val entries = JSONArray()
     for (index in 0 until source.length()) {
@@ -1616,8 +1792,7 @@ private fun DownloadsScreen(result: JSONObject?, api: RouterApi?, onRefresh: () 
         val rows = mutableListOf<Pair<String, JSONObject>>()
         listOf("active", "waiting", "stopped").forEach { key ->
             val array = result?.optJSONArray(key) ?: return@forEach
-            for (i in 0 until array.length()) {
-                val task = array.optJSONObject(i) ?: continue
+            for (i in 0 until array.length()) {                val task = array.optJSONObject(i) ?: continue
                 rows += (if (key == "active") "active" else if (key == "waiting") "waiting" else task.optString("status", "stopped")) to task
             }
         }
@@ -1689,7 +1864,7 @@ private fun DownloadsScreen(result: JSONObject?, api: RouterApi?, onRefresh: () 
 }
 
 @Composable
-private fun ServicesScreen(result: JSONObject?, processes: String?, api: RouterApi?, onRefresh: () -> Unit) {
+private fun ServicesScreen(result: JSONObject?, processes: String?, diagnostics: String?, api: RouterApi?, onRefresh: () -> Unit) {
     val names = result?.keys()?.asSequence()?.toList()?.sorted() ?: emptyList()
     val scope = rememberCoroutineScope()
     var busyService by remember { mutableStateOf<String?>(null) }
@@ -1735,10 +1910,17 @@ private fun ServicesScreen(result: JSONObject?, processes: String?, api: RouterA
                     Icon(Icons.Outlined.Refresh, contentDescription = "Обновить список")
                 }
             }
+            Text("${names.size} служб получено", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (message != null) Text(message!!, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 6.dp))
         }
-        if (names.isEmpty()) item { EmptyState("Нет данных о службах. Проверь доступ к ubus rc.list.") }
+        if (!diagnostics.isNullOrBlank()) item {
+            InfoCard("Неполный список служб") {
+                Text(diagnostics, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        if (names.isEmpty()) item { EmptyState("Нет данных о службах. Проверь доступ к ubus rc.list и file.exec.") }
         else items(names) { name ->
             val service = result?.optJSONObject(name) ?: JSONObject()
             val hasRuntimeState = service.has("running")
@@ -1777,6 +1959,62 @@ private fun ServicesScreen(result: JSONObject?, processes: String?, api: RouterA
                 }
                 if (busyService == name) LinearProgressIndicator(Modifier.fillMaxWidth())
             }
+        }
+    }
+}
+
+private fun extractTopProcessRows(top: String): List<String> {
+    val lines = top.lines()
+    val headerIndex = lines.indexOfFirst { line ->
+        val normalized = line.uppercase()
+        normalized.contains("PID") && (normalized.contains("%CPU") || normalized.contains("CPU%") ||
+            normalized.contains("%VSZ") || normalized.contains("COMMAND"))
+    }
+    if (headerIndex < 0) return emptyList()
+    return lines.drop(headerIndex + 1).filter { it.trim().matches(Regex("^\\d+\\s+.*")) }
+}
+
+@Composable
+private fun ProcessesScreen(output: String?, onRefresh: () -> Unit) {
+    val sections = output.orEmpty().split("\n--ROUTERDASH-PS--\n", limit = 2)
+    val top = sections.getOrNull(0).orEmpty().trim()
+    val psRows = sections.getOrNull(1).orEmpty().lineSequence().filter { it.isNotBlank() }.toList()
+    val topRows = remember(top) { extractTopProcessRows(top) }
+    val processRows = if (topRows.isNotEmpty()) topRows else psRows
+    var query by rememberSaveable { mutableStateOf("") }
+    val filteredRows = remember(processRows, query) {
+        processRows.filter { query.isBlank() || it.contains(query, true) }
+    }
+    LazyColumn(contentPadding = PaddingValues(vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically) {
+                Text("Процессы роутера", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, contentDescription = "Обновить процессы") }            }
+            Text("Список берётся из таблицы top, если роутер её возвращает; иначе используется ps. Проценты показываются только если они есть в заголовке top.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        item {
+            InfoCard("Загрузка системы · top") {
+                Text(top.ifBlank { "Нет данных top. Нажми «Обновить» или проверь доступ file.exec." },
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        item {
+            Text(if (topRows.isNotEmpty()) "Процессы · CPU / память из top" else "Процессы · список ps (без метрик CPU/RAM)",
+                style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(),
+                label = { Text("Поиск процесса") }, singleLine = true)
+            Text("${filteredRows.size} строк", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (filteredRows.isEmpty()) item { EmptyState("Список процессов пуст или данные недоступны. Проверь диагностический текст top выше.") }
+        else items(filteredRows) { row ->
+            Text(row, Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp),
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -1901,14 +2139,48 @@ private fun VpnScreen(status: String?, onRefresh: () -> Unit) {
 }
 
 
+private data class FirewallUciSection(val id: String, val type: String, val values: JSONObject)
+
+private fun parseFirewallUciSections(raw: String): List<FirewallUciSection> {
+    val start = raw.indexOf('{')
+    val end = raw.lastIndexOf('}')
+    if (start < 0 || end <= start) return emptyList()
+    val root = runCatching { JSONObject(raw.substring(start, end + 1)) }.getOrNull() ?: return emptyList()
+    val values = root.optJSONObject("values") ?: root
+    val result = mutableListOf<FirewallUciSection>()
+    val keys = values.keys()
+    while (keys.hasNext()) {
+        val id = keys.next()
+        val section = values.optJSONObject(id) ?: continue
+        val type = section.optString(".type", section.optString("type", ""))
+        if (type.isNotBlank()) result += FirewallUciSection(id, type, section)
+    }
+    return result
+}
+
+private fun firewallValue(section: JSONObject, key: String): String {
+    val value = section.opt(key) ?: return "—"
+    return when (value) {
+        is JSONArray -> (0 until value.length()).mapNotNull { value.optString(it).takeIf(String::isNotBlank) }.joinToString(", ").ifBlank { "—" }
+        JSONObject.NULL -> "—"
+        else -> value.toString().ifBlank { "—" }
+    }
+}
+
 @Composable
 private fun FirewallScreen(rules: String?, onRefresh: () -> Unit) {
     val text = rules.orEmpty()
     val sections = text.split("NFT_RULESET")
     val uci = sections.firstOrNull().orEmpty().substringAfter("UCI_FIREWALL", "")
     val nft = sections.getOrNull(1).orEmpty()
-    val uciLines = uci.lines().filter { it.isNotBlank() }
     val nftLines = nft.lines().filter { it.isNotBlank() }
+    val parsed = remember(uci) { parseFirewallUciSections(uci) }
+    val zones = parsed.filter { it.type == "zone" }
+    val rulesList = parsed.filter { it.type == "rule" }
+    val redirects = parsed.filter { it.type == "redirect" }
+    val defaults = parsed.filter { it.type == "defaults" }
+    var showRaw by remember { mutableStateOf(false) }
+
     LazyColumn(contentPadding = PaddingValues(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
@@ -1916,19 +2188,73 @@ private fun FirewallScreen(rules: String?, onRefresh: () -> Unit) {
                 Text("Правила firewall", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, null) }
             }
-            Text("Настройки зон, перенаправлений портов и фактические правила nftables (firewall4).",
+            Text("Зоны, правила фильтрации, перенаправления портов и фактический ruleset nftables.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         item {
-            InfoCard("Конфигурация UCI · ${uciLines.size} строк") {
-                Text(if (uciLines.isEmpty()) "Конфигурация firewall не получена." else uciLines.joinToString("\n"),
+            InfoCard("Сводка конфигурации") {
+                InfoLine("Зоны", zones.size.toString())
+                InfoLine("Правила", rulesList.size.toString())
+                InfoLine("Перенаправления портов", redirects.size.toString())
+                InfoLine("Параметры по умолчанию", defaults.size.toString())
+                if (parsed.isEmpty()) Text("Не удалось разобрать структуру UCI. Ниже доступен исходный ответ RPC.",
+                    color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        if (zones.isNotEmpty()) {
+            item { Text("Зоны сети", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
+            items(zones, key = { it.id }) { entry ->
+                InfoCard(firewallValue(entry.values, "name").let { if (it == "—") "Зона · ${entry.id}" else it }) {
+                    InfoLine("Сеть", firewallValue(entry.values, "network"))
+                    InfoLine("Входящий трафик", firewallValue(entry.values, "input"))
+                    InfoLine("Исходящий трафик", firewallValue(entry.values, "output"))
+                    InfoLine("Пересылка", firewallValue(entry.values, "forward"))
+                    InfoLine("Маскарадинг", firewallValue(entry.values, "masq"))
+                    InfoLine("MTU fix", firewallValue(entry.values, "mtu_fix"))
+                }
+            }
+        }
+        if (rulesList.isNotEmpty()) {
+            item { Text("Правила фильтрации", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
+            items(rulesList, key = { it.id }) { entry ->
+                InfoCard(firewallValue(entry.values, "name").let { if (it == "—") "Правило · ${entry.id}" else it }) {
+                    InfoLine("Источник", firewallValue(entry.values, "src"))
+                    InfoLine("Назначение", firewallValue(entry.values, "dest"))
+                    InfoLine("Протокол", firewallValue(entry.values, "proto"))
+                    InfoLine("Порт источника", firewallValue(entry.values, "src_port"))
+                    InfoLine("Порт назначения", firewallValue(entry.values, "dest_port"))
+                    InfoLine("Действие", firewallValue(entry.values, "target"))
+                    InfoLine("Включено", firewallValue(entry.values, "enabled"))
+                }
+            }
+        }
+        if (redirects.isNotEmpty()) {
+            item { Text("Перенаправления портов", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
+            items(redirects, key = { it.id }) { entry ->
+                InfoCard(firewallValue(entry.values, "name").let { if (it == "—") "Перенаправление · ${entry.id}" else it }) {
+                    InfoLine("Внешняя зона", firewallValue(entry.values, "src"))
+                    InfoLine("Внешний порт", firewallValue(entry.values, "src_dport"))
+                    InfoLine("Внутренний адрес", firewallValue(entry.values, "dest_ip"))
+                    InfoLine("Внутренний порт", firewallValue(entry.values, "dest_port"))
+                    InfoLine("Протокол", firewallValue(entry.values, "proto"))
+                    InfoLine("Включено", firewallValue(entry.values, "enabled"))
+                }
+            }
+        }
+        item {
+            InfoCard("Активные правила nftables · ${nftLines.size} строк") {
+                Text(if (nftLines.isEmpty()) nft.trim().ifBlank { "Не удалось прочитать nft ruleset. Проверь наличие nftables и разрешения RPC file.exec." }
+                    else nftLines.joinToString("\n"),
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
             }
         }
         item {
-            InfoCard("Активные правила nftables · ${nftLines.size} строк") {
-                Text(if (nftLines.isEmpty()) "Не удалось прочитать nft ruleset. Проверь наличие nftables." else nftLines.joinToString("\n"),
+            OutlinedButton(onClick = { showRaw = !showRaw }, modifier = Modifier.fillMaxWidth()) {
+                Text(if (showRaw) "Скрыть исходную конфигурацию UCI" else "Показать исходную конфигурацию UCI")
+            }
+            if (showRaw) InfoCard("Исходный ответ UCI") {
+                Text(uci.ifBlank { "UCI firewall не получен." },
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
             }
@@ -2064,8 +2390,7 @@ private fun TrafficCard(history: List<TrafficPoint>, rx: Long?, tx: Long?) {
                 history.forEachIndexed { index, point ->
                     val x = index * step
                     val y = size.height - (selector(point).toFloat() / maxValue) * (size.height - 8.dp.toPx()) - 4.dp.toPx()
-                    if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
-                }
+                    if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)                }
                 drawPath(path, color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx()))
             }
             drawSeries({ it.rx }, rxColor)
@@ -2173,6 +2498,41 @@ internal class SshTerminal(private val context: android.content.Context) {
         val buffer = ByteArray(minOf(available, 8192))
         val count = stream.read(buffer)
         return if (count > 0) String(buffer, 0, count, Charsets.UTF_8) else ""
+    }
+
+    /** Runs only built-in read-only diagnostics over the authenticated SSH session. */
+    @Synchronized
+    fun execReadOnly(command: String): String {
+        val allowed = setOf("top -b -n 1", "busybox top -b -n 1", "ps -o pid,comm,rss", "ps", "ps w",
+            "df -kP", "df -h", "mount", "cat /proc/mounts", "cat /proc/diskstats", "block info",
+            "ls -l /dev", "ls -1 /sys/block", "ls -1 /etc/init.d",
+            "cat /proc/loadavg", "cat /proc/stat",
+            "cat /sys/class/thermal/thermal_zone0/temp", "cat /sys/class/hwmon/hwmon0/temp1_input",
+            "ip -o addr", "ip route", "tailscale status", "tailscale ip -4", "wg show", "sing-box version")
+        require(command in allowed) { "Команда не входит в список разрешённых диагностических операций." }
+        val active = session ?: throw IllegalStateException("SSH-сессия не открыта.")
+        check(active.isConnected) { "SSH-соединение потеряно. Подключись заново." }
+        val channel = active.openChannel("exec") as ChannelExec
+        channel.setCommand(command)
+        val stdout = channel.inputStream
+        val stderr = ByteArrayOutputStream()
+        channel.setErrStream(stderr)
+        val output = ByteArrayOutputStream()
+        try {
+            channel.connect(10000)
+            val buffer = ByteArray(4096)
+            val deadline = System.currentTimeMillis() + 12000L
+            while (System.currentTimeMillis() < deadline) {
+                while (stdout.available() > 0) { val count = stdout.read(buffer); if (count > 0) output.write(buffer, 0, count) }
+                if (channel.isClosed) break
+                Thread.sleep(25)
+            }
+            while (stdout.available() > 0) { val count = stdout.read(buffer); if (count > 0) output.write(buffer, 0, count) }
+            if (!channel.isClosed) throw IllegalStateException("Превышено время ожидания SSH-команды.")
+            val result = output.toString(Charsets.UTF_8.name())
+            if (channel.exitStatus != 0) throw IllegalStateException(stderr.toString(Charsets.UTF_8.name()).trim().ifBlank { "Команда завершилась с кодом ${channel.exitStatus}" })
+            return result
+        } finally { runCatching { channel.disconnect() } }
     }
 
     private fun openSftp(): ChannelSftp {
@@ -2429,8 +2789,7 @@ private class RouterApi(val baseUrl: String) {
             if (!response.isSuccessful) {
                 val detail = text.replace(Regex("\\s+"), " ").take(180)
                 val suffix = if (detail.isBlank()) "" else " — $detail"
-                throw IllegalStateException("HTTP " + response.code + " на " + path + suffix)
-            }
+                throw IllegalStateException("HTTP " + response.code + " на " + path + suffix)            }
             return text
         }
     }
@@ -2443,6 +2802,104 @@ private fun readUbusFile(api: RouterApi, path: String): String? {
     return runCatching {
         String(android.util.Base64.decode(encoded, android.util.Base64.DEFAULT), Charsets.UTF_8)
     }.getOrElse { encoded }
+}
+
+internal fun parseLoadAverage(raw: String?): String? {
+    val values = raw?.trim()?.split(Regex("\\s+"))?.take(3) ?: return null
+    if (values.size != 3 || values.any { it.toDoubleOrNull() == null }) return null
+    return values.joinToString(" / ") { String.format(java.util.Locale.US, "%.2f", it.toDouble()) }
+}
+
+internal fun parseTemperatureC(raw: String?): Double? {
+    val value = raw?.trim()?.toDoubleOrNull() ?: return null
+    val celsius = if (value > 1000.0) value / 1000.0 else value
+    return celsius.takeIf { it in -20.0..150.0 }
+}
+
+private fun readRouterTemperature(api: RouterApi, ssh: SshTerminal?): Double? {
+    val paths = listOf("/sys/class/thermal/thermal_zone0/temp", "/sys/class/hwmon/hwmon0/temp1_input")
+    for (path in paths) {
+        val rpcValue = runCatching { readUbusFile(api, path) }.getOrNull()
+        val sshValue = if (rpcValue.isNullOrBlank()) runCatching { ssh?.execReadOnly("cat $path") }.getOrNull() else null
+        val parsed = parseTemperatureC(rpcValue?.takeIf { it.isNotBlank() } ?: sshValue)
+        if (parsed != null) return parsed
+    }
+    return null
+}
+
+private fun readVpnDiagnostics(ssh: SshTerminal?): String {
+    if (ssh == null) return "Нет данных VPN: подключи SSH в разделе «SSH-терминал»."
+    fun read(command: String): String = runCatching { ssh.execReadOnly(command).trim() }.getOrDefault("")
+    val processes = read("ps").lineSequence()
+        .filter { Regex("tailscaled|sing-box|xray|openvpn|wireguard").containsMatchIn(it) }
+        .toList().joinToString("\n")
+    val addresses = read("ip -o addr")
+    val routes = read("ip route")
+    val tailscale = read("tailscale status")
+    val tailscaleIp = read("tailscale ip -4")
+    val wireguard = read("wg show")
+    val singBox = read("sing-box version")
+    val sections = listOf(
+        "VPN-процессы" to processes,
+        "VPN-интерфейсы и адреса" to addresses.lineSequence().filter { Regex("tailscale|tun[0-9]*|wg[0-9]*").containsMatchIn(it) }.joinToString("\n"),
+        "Маршруты" to routes.lineSequence().filter { Regex("tailscale|tun|wg").containsMatchIn(it) }.joinToString("\n"),
+        "Tailscale status" to tailscale,
+        "Tailscale IPv4" to tailscaleIp,
+        "WireGuard" to wireguard,
+        "sing-box" to singBox
+    ).filter { it.second.isNotBlank() }
+    return if (sections.isEmpty()) "Не удалось получить подтверждённые сведения о VPN через SSH."
+        else sections.joinToString("\n\n") { (title, value) -> "$title:\n$value" }
+}
+
+internal fun normalizeServiceInventory(vararg sources: JSONObject?): JSONObject {
+    val result = JSONObject()
+    fun add(name: String, value: JSONObject) {
+        if (!name.matches(Regex("[A-Za-z0-9_.@+-]{1,128}"))) return
+        val target = result.optJSONObject(name) ?: JSONObject()
+        value.keys().forEach { key -> target.put(key, value.opt(key)) }
+        val instances = value.opt("instances")
+        if (!value.has("running") && instances != null) {
+            val states = mutableListOf<Boolean>()
+            when (instances) {
+                is JSONArray -> for (index in 0 until instances.length()) {
+                    val item = instances.optJSONObject(index) ?: continue
+                    if (item.has("running")) states += item.optBoolean("running")
+                }
+                is JSONObject -> instances.keys().forEach { key ->
+                    val item = instances.optJSONObject(key) ?: return@forEach
+                    if (item.has("running")) states += item.optBoolean("running")
+                }
+            }
+            if (states.isNotEmpty()) target.put("running", states.any { it })
+        }
+        result.put(name, target)
+    }
+    fun visit(obj: JSONObject, depth: Int) {
+        if (depth > 5) return
+        val keys = obj.keys().asSequence().toList()
+        if (keys.any { it in setOf("running", "enabled", "instances", "name", "service") }) return
+        keys.forEach { key ->
+            when (val value = obj.opt(key)) {
+                is JSONObject -> {
+                    val fields = value.keys().asSequence().toSet()
+                    if (fields.any { it in setOf("running", "enabled", "instances", "start", "stop", "reload") }) add(key, value)
+                    else if (fields.isNotEmpty()) visit(value, depth + 1)
+                }
+                is JSONArray -> for (index in 0 until value.length()) {
+                    when (val entryValue = value.opt(index)) {
+                        is JSONObject -> {
+                            val name = entryValue.optString("name", entryValue.optString("service", ""))
+                            if (name.isNotBlank()) add(name, entryValue) else visit(entryValue, depth + 1)
+                        }
+                        is String -> add(entryValue, JSONObject())
+                    }
+                }
+            }
+        }
+    }
+    sources.filterNotNull().forEach { visit(it, 0) }
+    return result
 }
 
 private fun parseCpuTicks(raw: String?): LongArray? {

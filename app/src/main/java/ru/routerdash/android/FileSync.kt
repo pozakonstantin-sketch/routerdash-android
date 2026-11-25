@@ -2,8 +2,6 @@ package ru.routerdash.android
 
 import android.content.Context
 import android.net.Uri
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -165,7 +163,7 @@ internal object SftpFileSync {
 }
 
 @Composable
-internal fun SyncScreen(sshConnected: Boolean, ssh: SshTerminal?, sshHostDefault: String, sshUserDefault: String, onOpenSsh: () -> Unit) {
+internal fun SyncScreen(sshConnected: Boolean, ssh: SshTerminal?, sshHostDefault: String, sshUserDefault: String, onOpenSsh: () -> Unit, pickedFolderUri: String?, onPickFolder: () -> Unit) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("routerdash_sync", 0) }
     val scope = rememberCoroutineScope()
@@ -191,14 +189,13 @@ internal fun SyncScreen(sshConnected: Boolean, ssh: SshTerminal?, sshHostDefault
     var autoError by remember { mutableStateOf<String?>(null) }
     val plan = remember { mutableStateListOf<SyncPlanItem>() }
 
-    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) {
-            runCatching { context.contentResolver.takePersistableUriPermission(uri,
-                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
-            treeUriText = uri.toString()
-            prefs.edit().putString("tree_uri", treeUriText).apply()
-            plan.clear(); errorText = null
-        }
+    LaunchedEffect(pickedFolderUri) {
+        val uriText = pickedFolderUri?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
+        val uri = runCatching { Uri.parse(uriText) }.getOrNull() ?: return@LaunchedEffect
+        treeUriText = uriText
+        prefs.edit().putString("tree_uri", uriText).apply()
+        plan.clear()
+        errorText = null
     }
 
     fun scanFiles() {
@@ -266,7 +263,7 @@ internal fun SyncScreen(sshConnected: Boolean, ssh: SshTerminal?, sshHostDefault
         item {
             InfoCard("Папки синхронизации") {
                 Text("Телефон · $folderName", fontWeight = FontWeight.SemiBold)
-                OutlinedButton(onClick = { folderPicker.launch(null) }, modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(onClick = onPickFolder, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Outlined.Folder, null); Spacer(Modifier.width(8.dp)); Text("Выбрать папку телефона")
                 }
                 OutlinedTextField(remoteRoot, { remoteRoot = it }, Modifier.fillMaxWidth(),
