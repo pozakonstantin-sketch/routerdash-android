@@ -349,6 +349,30 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                             val sysBlock = readDiagnostic("ls /sys/block", "ls", listOf("-1", "/sys/block"))
                             val diskStats = readDiagnostic("/proc/diskstats", "cat", listOf("/proc/diskstats"))
                             val dfHuman = readDiagnostic("df -h", "df", listOf("-h"))
+                            // Always merge df metrics, even when LuCI returned only root/tmp.
+                            val dfRows = runCatching { parseDfOutput(client.execReadOnly("df", listOf("-kP"))) }
+                                .onFailure { failures += "df -kP (метрики файловых систем): ${it.message}" }
+                                .getOrDefault(JSONArray())
+                            val mountIndexes = mutableMapOf<String, Int>()
+                            for (index in 0 until mounts.length()) {
+                                val path = mounts.optJSONObject(index)?.optString("mount").orEmpty()
+                                if (path.isNotBlank()) mountIndexes[path] = index
+                            }
+                            for (index in 0 until dfRows.length()) {
+                                val row = dfRows.optJSONObject(index) ?: continue
+                                val path = row.optString("mount")
+                                val existingIndex = mountIndexes[path]
+                                if (existingIndex == null) {
+                                    mounts.put(row)
+                                    mountIndexes[path] = mounts.length() - 1
+                                } else {
+                                    val existing = mounts.optJSONObject(existingIndex) ?: JSONObject()
+                                    listOf("device", "size", "used", "avail").forEach { key ->
+                                        if (row.has(key)) existing.put(key, row.opt(key))
+                                    }
+                                    mounts.put(existingIndex, existing)
+                                }
+                            }
                             val knownAfterMerge = (0 until mounts.length()).mapNotNull { mounts.optJSONObject(it)?.optString("mount") }.toSet()
                             if ("/mnt/sda" !in knownAfterMerge && "/mnt/sda1" !in knownAfterMerge) {
                                 failures += "SSD /mnt/sda не обнаружен среди точек монтирования."
