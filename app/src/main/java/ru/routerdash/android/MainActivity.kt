@@ -202,6 +202,7 @@ private data class Snapshot(
     val vpnStatus: String? = null, val diskDetails: String? = null, val firewallRules: String? = null,
     val cpuRaw: String? = null, val networkDevices: JSONObject? = null,
     val processes: String? = null, val logsError: String? = null,
+    val loadAverageRaw: String? = null, val temperatureC: Double? = null,
     val cpuPercent: Int? = null, val rxRate: Long? = null, val txRate: Long? = null,
     val trafficHistory: List<TrafficPoint> = emptyList(),
     val cpuHistory: List<Int> = emptyList()
@@ -244,10 +245,14 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                         Screen.OVERVIEW -> snapshot.copy(
                             board = client.call("system", "board"),
                             info = client.call("system", "info"),
+                            loadAverageRaw = runCatching { readUbusFile(client, "/proc/loadavg") }.getOrNull(),
+                            temperatureC = readRouterTemperature(client),
                             cpuRaw = runCatching { readUbusFile(client, "/proc/stat") }.getOrNull()?.takeIf { it.contains("cpu ") }
                                 ?: runCatching { client.execReadOnly("cat", listOf("/proc/stat")) }.getOrNull(),
                             networkDevices = client.call("luci-rpc", "getNetworkDevices"),
-                            storage = runCatching { parseDfOutput(client.execReadOnly("df", listOf("-kP"))) }.getOrNull(),
+                            storage = runCatching { parseDfOutput(client.execReadOnly("df", listOf("-kP"))) }.getOrNull()
+                                ?.takeIf { it.length() > 0 }
+                                ?: runCatching { sshSession?.execReadOnly("df -kP")?.let(::parseDfOutput) }.getOrNull(),
                             vpnStatus = runCatching {
                                 client.execReadOnly("sh", listOf("-c",
                                     "echo VPN_PROCESSES; ps | grep -E \"tailscale|sing-box|xray|openvpn|wireguard\" | grep -v grep; " +
@@ -314,6 +319,9 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                                 mounts = runCatching { parseProcMounts(readUbusFile(client, "/proc/mounts").orEmpty()) }
                                     .onFailure { failures += "/proc/mounts: ${it.message}" }.getOrDefault(JSONArray())
                             }
+                            // SSH fallback is only used after an explicit connection in the SSH screen.
+                            val sshDf = runCatching { sshSession?.execReadOnly("df -kP") }.getOrNull().orEmpty()
+                            if (mounts.length() == 0 && sshDf.isNotBlank()) mounts = parseDfOutput(sshDf)
                             // Match LuCI's own storage page: system.info provides root and tmp
                             // capacities in KiB, while luci.getMountPoints provides mounted volumes in bytes.
                             runCatching {
@@ -332,10 +340,14 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                                     }
                                 }
                             }
-                            fun readDiagnostic(label: String, command: String, args: List<String> = emptyList()): String {
-                                return runCatching { client.execReadOnly(command, args) }
-                                    .onFailure { failures += "$label: ${it.message}" }
-                                    .getOrElse { "Недоступно: ${it.message}" }
+                            fun readDiagnostic(label: String, command: String, args: List<String> = emptyList(), sshCommand: String = command + if (args.isEmpty()) "" else " " + args.joinToString(" ")): String {
+                                val rpc = runCatching { client.execReadOnly(command, args) }
+                                if (rpc.isSuccess && rpc.getOrNull().orEmpty().isNotBlank()) return rpc.getOrThrow()
+                                val ssh = runCatching { sshSession?.execReadOnly(sshCommand) }
+                                if (ssh.isSuccess && !ssh.getOrNull().isNullOrBlank()) return ssh.getOrThrow()
+                                val reason = rpc.exceptionOrNull()?.message ?: "пустой ответ"
+                                failures += "$label: $reason" + (ssh.exceptionOrNull()?.message?.let { "; SSH: $it" } ?: "")
+                                return "Недоступно: $reason"
                             }
                             val mountOutput = readDiagnostic("mount", "mount")
                             val mountedPaths = parseMountCommandOutput(mountOutput)
@@ -350,9 +362,8 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                             val diskStats = readDiagnostic("/proc/diskstats", "cat", listOf("/proc/diskstats"))
                             val dfHuman = readDiagnostic("df -h", "df", listOf("-h"))
                             // Always merge df metrics, even when LuCI returned only root/tmp.
-                            val dfRows = runCatching { parseDfOutput(client.execReadOnly("df", listOf("-kP"))) }
-                                .onFailure { failures += "df -kP (метрики файловых систем): ${it.message}" }
-                                .getOrDefault(JSONArray())
+                            val dfOutput = readDiagnostic("df -kP (метрики файловых систем)", "df", listOf("-kP"))
+                            val dfRows = if (dfOutput.startsWith("Недоступно:")) JSONArray() else parseDfOutput(dfOutput)
                             val mountIndexes = mutableMapOf<String, Int>()
                             for (index in 0 until mounts.length()) {
                                 val path = mounts.optJSONObject(index)?.optString("mount").orEmpty()
@@ -434,30 +445,32 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                                     .filter { it.matches(Regex("[A-Za-z0-9_.-]+")) }.toList()
                             }.onFailure { serviceFailures += "ls /etc/init.d: ${it.message}" }
                                 .getOrDefault(emptyList())
-                            val mergedServices = JSONObject()
-                            val serviceNames = linkedSetOf<String>()
-                            initNames.forEach { serviceNames += it }
-                            rcServices.keys().forEach { serviceNames += it }
-                            initServices?.keys()?.forEach { serviceNames += it }
-                            serviceNames.sorted().forEach { name ->
-                                val merged = JSONObject()
-                                val init = initServices?.optJSONObject(name)
-                                val runtime = rcServices.optJSONObject(name)
-                                init?.keys()?.forEach { key -> merged.put(key, init.opt(key)) }
-                                runtime?.keys()?.forEach { key -> merged.put(key, runtime.opt(key)) }
-                                mergedServices.put(name, merged)
+                            val sshInitNames = if (initNames.isEmpty()) {
+                                runCatching { sshSession?.execReadOnly("ls -1 /etc/init.d") }.getOrNull().orEmpty()
+                                    .lineSequence().map { it.trim() }
+                                    .filter { it.matches(Regex("[A-Za-z0-9_.-]+")) }.toList()
+                            } else emptyList()
+                            val mergedServices = normalizeServiceInventory(rcServices, initServices)
+                            (initNames + sshInitNames).distinct().forEach { name ->
+                                if (!mergedServices.has(name)) mergedServices.put(name, JSONObject())
                             }
+                            val serviceNames = mergedServices.keys().asSequence().toList().toSet()
                             val topResult = runCatching { client.execReadOnly("top", listOf("-b", "-n", "1")) }
-                            val topText = topResult.getOrNull()?.takeIf { it.isNotBlank() }
-                                ?: runCatching { client.execReadOnly("busybox", listOf("top", "-b", "-n", "1")) }
-                                    .getOrElse { topResult.exceptionOrNull()?.let { error -> "Не удалось получить top: ${error.message}; busybox top: ${it.message}" } ?: "Команда top не вернула данные: ${it.message}" }
-                            val psResult = runCatching { client.execReadOnly("ps", listOf("-o", "pid,comm,rss")) }
+                            val topRpc = topResult.getOrNull()?.takeIf { it.isNotBlank() }
+                                ?: runCatching { client.execReadOnly("busybox", listOf("top", "-b", "-n", "1")) }.getOrNull()
+                            val topSsh = if (topRpc.isNullOrBlank()) runCatching { sshSession?.execReadOnly("top -b -n 1") }.getOrNull() else null
+                            val topText = topRpc?.takeIf { it.isNotBlank() } ?: topSsh?.takeIf { it.isNotBlank() }
+                                ?: "Не удалось получить top: ${topResult.exceptionOrNull()?.message ?: "file.exec недоступен"}" +
+                                    if (sshSession == null) ". Подключи SSH в соответствующем разделе для получения процессов." else ""
+                            val psRpc = runCatching { client.execReadOnly("ps", listOf("-o", "pid,comm,rss")) }
                                 .recoverCatching { client.execReadOnly("ps") }
-                                .recoverCatching { client.execReadOnly("ps", listOf("w")) }
-                            val psText = psResult.getOrElse { "Не удалось получить список процессов ps: ${it.message}" }
+                                .recoverCatching { client.execReadOnly("ps", listOf("w")) }.getOrNull()
+                            val psSsh = if (psRpc.isNullOrBlank()) runCatching { sshSession?.execReadOnly("ps -o pid,comm,rss") }.getOrNull() else null
+                            val psText = psRpc?.takeIf { it.isNotBlank() } ?: psSsh?.takeIf { it.isNotBlank() }
+                                ?: "Не удалось получить список процессов ps."
                             val processOutput = topText + "\n--ROUTERDASH-PS--\n" + psText
                             val serviceDiagnostics = buildList {
-                                if (initNames.isEmpty()) add("Не удалось получить полный список /etc/init.d; отображены только службы, возвращённые ubus.")
+                                if (initNames.isEmpty() && sshInitNames.isEmpty()) add("Полный список /etc/init.d недоступен через LuCI RPC. Подключи SSH в разделе «SSH-терминал», чтобы получить полный инвентарь без изменения ACL.")
                                 if (serviceNames.size < 10) add("Получено только ${serviceNames.size} имён служб; ожидается полный системный список.")
                                 addAll(serviceFailures)
                             }.joinToString("\n").ifBlank { null }
@@ -938,7 +951,7 @@ private fun OverviewScreen(s: Snapshot) {
     val ramPercent = if (total > 0L) (used.toFloat() / total).coerceIn(0f, 1f) else 0f
     val uptime = info?.optLong("uptime")?.let { duration(it) } ?: "—"
     val loadValues = info?.optJSONArray("load")
-    val load = if (loadValues != null && loadValues.length() >= 3) {
+    val load = parseLoadAverage(s.loadAverageRaw) ?: if (loadValues != null && loadValues.length() >= 3) {
         (0..2).joinToString(" / ") { index ->
             String.format(java.util.Locale.US, "%.2f", loadValues.optLong(index) / 65536.0)
         }
@@ -1002,6 +1015,10 @@ private fun OverviewScreen(s: Snapshot) {
                         androidx.compose.ui.graphics.Color(0xFFB58CFF), Modifier.weight(0.8f))
                 }
             }
+        }
+        item {
+            DashboardMiniCard("Температура CPU", s.temperatureC?.let { String.format(java.util.Locale.US, "%.1f °C", it) } ?: "Нет датчика",
+                "Датчик thermal/hwmon", androidx.compose.ui.graphics.Color(0xFFFFB454), Icons.Outlined.DeviceThermostat)
         }
         item {
             DashboardMiniCard("Диск / overlay", if (diskPercent >= 0) "${diskPercent}%" else "—",
@@ -2488,6 +2505,38 @@ internal class SshTerminal(private val context: android.content.Context) {
         return if (count > 0) String(buffer, 0, count, Charsets.UTF_8) else ""
     }
 
+    /** Runs only built-in read-only diagnostics over the authenticated SSH session. */
+    @Synchronized
+    fun execReadOnly(command: String): String {
+        val allowed = setOf("top -b -n 1", "busybox top -b -n 1", "ps -o pid,comm,rss", "ps", "ps w",
+            "df -kP", "df -h", "mount", "cat /proc/mounts", "cat /proc/diskstats", "block info",
+            "ls -l /dev", "ls -1 /sys/block", "ls -1 /etc/init.d")
+        require(command in allowed) { "Команда не входит в список разрешённых диагностических операций." }
+        val active = session ?: throw IllegalStateException("SSH-сессия не открыта.")
+        check(active.isConnected) { "SSH-соединение потеряно. Подключись заново." }
+        val channel = active.openChannel("exec") as ChannelExec
+        channel.setCommand(command)
+        val stdout = channel.inputStream
+        val stderr = ByteArrayOutputStream()
+        channel.setErrStream(stderr)
+        val output = ByteArrayOutputStream()
+        try {
+            channel.connect(10000)
+            val buffer = ByteArray(4096)
+            val deadline = System.currentTimeMillis() + 12000L
+            while (System.currentTimeMillis() < deadline) {
+                while (stdout.available() > 0) { val count = stdout.read(buffer); if (count > 0) output.write(buffer, 0, count) }
+                if (channel.isClosed) break
+                Thread.sleep(25)
+            }
+            while (stdout.available() > 0) { val count = stdout.read(buffer); if (count > 0) output.write(buffer, 0, count) }
+            if (!channel.isClosed) throw IllegalStateException("Превышено время ожидания SSH-команды.")
+            val result = output.toString(Charsets.UTF_8.name())
+            if (channel.exitStatus != 0) throw IllegalStateException(stderr.toString(Charsets.UTF_8.name()).trim().ifBlank { "Команда завершилась с кодом ${channel.exitStatus}" })
+            return result
+        } finally { runCatching { channel.disconnect() } }
+    }
+
     private fun openSftp(): ChannelSftp {
         val active = session ?: throw IllegalStateException("SSH-сессия не открыта.")
         if (!active.isConnected) throw IllegalStateException("SSH-соединение потеряно. Подключись заново.")
@@ -2756,6 +2805,57 @@ private fun readUbusFile(api: RouterApi, path: String): String? {
     return runCatching {
         String(android.util.Base64.decode(encoded, android.util.Base64.DEFAULT), Charsets.UTF_8)
     }.getOrElse { encoded }
+}
+
+internal fun parseLoadAverage(raw: String?): String? {
+    val values = raw?.trim()?.split(Regex("\\s+"))?.take(3) ?: return null
+    if (values.size != 3 || values.any { it.toDoubleOrNull() == null }) return null
+    return values.joinToString(" / ") { String.format(java.util.Locale.US, "%.2f", it.toDouble()) }
+}
+
+internal fun parseTemperatureC(raw: String?): Double? {
+    val value = raw?.trim()?.toDoubleOrNull() ?: return null
+    val celsius = if (value > 1000.0) value / 1000.0 else value
+    return celsius.takeIf { it in -20.0..150.0 }
+}
+
+private fun readRouterTemperature(api: RouterApi): Double? {
+    for (path in listOf("/sys/class/thermal/thermal_zone0/temp", "/sys/class/hwmon/hwmon0/temp1_input")) {
+        val parsed = parseTemperatureC(runCatching { readUbusFile(api, path) }.getOrNull())
+        if (parsed != null) return parsed
+    }
+    return null
+}
+
+internal fun normalizeServiceInventory(vararg sources: JSONObject?): JSONObject {
+    val result = JSONObject()
+    fun add(name: String, value: JSONObject) {
+        if (!name.matches(Regex("[A-Za-z0-9_.@+-]{1,128}"))) return
+        val target = result.optJSONObject(name) ?: JSONObject()
+        value.keys().forEach { key -> target.put(key, value.opt(key)) }
+        result.put(name, target)
+    }
+    fun visit(obj: JSONObject, depth: Int) {
+        if (depth > 5) return
+        val keys = obj.keys().asSequence().toList()
+        if (keys.any { it in setOf("running", "enabled", "instances", "name", "service") }) return
+        keys.forEach { key ->
+            when (val value = obj.opt(key)) {
+                is JSONObject -> {
+                    val fields = value.keys().asSequence().toSet()
+                    if (fields.any { it in setOf("running", "enabled", "instances", "start", "stop", "reload") }) add(key, value)
+                    else if (fields.isNotEmpty()) visit(value, depth + 1)
+                }
+                is JSONArray -> for (index in 0 until value.length()) {
+                    val entry = value.optJSONObject(index) ?: continue
+                    val name = entry.optString("name", entry.optString("service", ""))
+                    if (name.isNotBlank()) add(name, entry) else visit(entry, depth + 1)
+                }
+            }
+        }
+    }
+    sources.filterNotNull().forEach { visit(it, 0) }
+    return result
 }
 
 private fun parseCpuTicks(raw: String?): LongArray? {
