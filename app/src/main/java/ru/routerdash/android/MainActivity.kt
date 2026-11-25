@@ -78,12 +78,13 @@ private fun RouterDashIcon(index: Int, description: String?, modifier: Modifier 
 class MainActivity : FragmentActivity() {
     private val securityPrefs by lazy { getSharedPreferences("routerdash_security", MODE_PRIVATE) }
     private val biometricUnlockSignal = androidx.compose.runtime.mutableIntStateOf(0)
+    private val pickedSyncFolderUri = androidx.compose.runtime.mutableStateOf<String?>(null)
     private var shouldAuthenticate = true
     private var promptVisible = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { RouterDashApp(biometricUnlockSignal.intValue, onEnableBiometric = { onEnabled -> enableBiometricLock(onEnabled) }) }
+        setContent { RouterDashApp(biometricUnlockSignal.intValue, pickedSyncFolderUri.value, { pickSyncFolder() }, onEnableBiometric = { onEnabled -> enableBiometricLock(onEnabled) }) }
     }
 
     override fun onStart() {
@@ -96,6 +97,30 @@ class MainActivity : FragmentActivity() {
     override fun onStop() {
         super.onStop()
         if (securityPrefs.getBoolean("biometric_enabled", false)) shouldAuthenticate = true
+    }
+
+    private val syncFolderRequestCode = 0x5244
+
+    private fun pickSyncFolder() {
+        val intent = android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                android.content.Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        // Keep the request code in the platform's supported 16-bit range.
+        startActivityForResult(intent, syncFolderRequestCode)
+    }
+
+    @Deprecated("Deprecated in Android API; bounded request code avoids registry overflow on affected devices")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == syncFolderRequestCode && resultCode == RESULT_OK) {
+            val uri = data?.data ?: return
+            val grantFlags = data.flags and
+                (android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            runCatching { contentResolver.takePersistableUriPermission(uri, grantFlags) }
+            pickedSyncFolderUri.value = uri.toString()
+        }
     }
 
     private fun enableBiometricLock(onEnabled: () -> Unit) {
@@ -184,7 +209,7 @@ private data class Snapshot(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> Unit) -> Unit) {
+private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: String?, onPickSyncFolder: () -> Unit, onEnableBiometric: (() -> Unit) -> Unit) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("routerdash", 0) }
     val scope = rememberCoroutineScope()
@@ -657,7 +682,9 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                             ssh = sshSession,
                             sshHostDefault = runCatching { URI(url).host ?: "192.168.1.1" }.getOrDefault("192.168.1.1"),
                             sshUserDefault = username,
-                            onOpenSsh = { selected = Screen.SSH }
+                            onOpenSsh = { selected = Screen.SSH },
+                            pickedFolderUri = pickedSyncFolderUri,
+                            onPickFolder = onPickSyncFolder
                         )
                         Screen.SSH -> SshScreen(
                             host = runCatching { URI(url).host ?: "192.168.1.1" }.getOrDefault("192.168.1.1"),
