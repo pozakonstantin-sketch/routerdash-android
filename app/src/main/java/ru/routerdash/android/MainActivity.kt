@@ -445,11 +445,9 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                                     .filter { it.matches(Regex("[A-Za-z0-9_.-]+")) }.toList()
                             }.onFailure { serviceFailures += "ls /etc/init.d: ${it.message}" }
                                 .getOrDefault(emptyList())
-                            val sshInitNames = if (initNames.isEmpty()) {
-                                runCatching { sshSession?.execReadOnly("ls -1 /etc/init.d") }.getOrNull().orEmpty()
-                                    .lineSequence().map { it.trim() }
-                                    .filter { it.matches(Regex("[A-Za-z0-9_.-]+")) }.toList()
-                            } else emptyList()
+                            val sshInitNames = runCatching { sshSession?.execReadOnly("ls -1 /etc/init.d") }.getOrNull().orEmpty()
+                                .lineSequence().map { it.trim() }
+                                .filter { it.matches(Regex("[A-Za-z0-9_.-]+")) }.toList()
                             val mergedServices = normalizeServiceInventory(rcServices, initServices)
                             (initNames + sshInitNames).distinct().forEach { name ->
                                 if (!mergedServices.has(name)) mergedServices.put(name, JSONObject())
@@ -2833,6 +2831,21 @@ internal fun normalizeServiceInventory(vararg sources: JSONObject?): JSONObject 
         if (!name.matches(Regex("[A-Za-z0-9_.@+-]{1,128}"))) return
         val target = result.optJSONObject(name) ?: JSONObject()
         value.keys().forEach { key -> target.put(key, value.opt(key)) }
+        val instances = value.opt("instances")
+        if (!value.has("running") && instances != null) {
+            val states = mutableListOf<Boolean>()
+            when (instances) {
+                is JSONArray -> for (index in 0 until instances.length()) {
+                    val item = instances.optJSONObject(index) ?: continue
+                    if (item.has("running")) states += item.optBoolean("running")
+                }
+                is JSONObject -> instances.keys().forEach { key ->
+                    val item = instances.optJSONObject(key) ?: return@forEach
+                    if (item.has("running")) states += item.optBoolean("running")
+                }
+            }
+            if (states.isNotEmpty()) target.put("running", states.any { it })
+        }
         result.put(name, target)
     }
     fun visit(obj: JSONObject, depth: Int) {
@@ -2847,9 +2860,13 @@ internal fun normalizeServiceInventory(vararg sources: JSONObject?): JSONObject 
                     else if (fields.isNotEmpty()) visit(value, depth + 1)
                 }
                 is JSONArray -> for (index in 0 until value.length()) {
-                    val entry = value.optJSONObject(index) ?: continue
-                    val name = entry.optString("name", entry.optString("service", ""))
-                    if (name.isNotBlank()) add(name, entry) else visit(entry, depth + 1)
+                    when (val entryValue = value.opt(index)) {
+                        is JSONObject -> {
+                            val name = entryValue.optString("name", entryValue.optString("service", ""))
+                            if (name.isNotBlank()) add(name, entryValue) else visit(entryValue, depth + 1)
+                        }
+                        is String -> add(entryValue, JSONObject())
+                    }
                 }
             }
         }
