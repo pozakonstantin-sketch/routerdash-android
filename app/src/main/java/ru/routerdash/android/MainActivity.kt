@@ -2830,7 +2830,7 @@ private fun readRouterTemperature(api: RouterApi, ssh: SshTerminal?): Double? {
     for (path in paths) {
         val rpcValue = runCatching { readUbusFile(api, path) }.getOrNull()
         val sshValue = if (rpcValue.isNullOrBlank()) runCatching { ssh?.execReadOnly("cat $path") }.getOrNull() else null
-        val parsed = parseTemperatureC(rpcValue ?: sshValue)
+        val parsed = parseTemperatureC(rpcValue?.takeIf { it.isNotBlank() } ?: sshValue)
         if (parsed != null) return parsed
     }
     return null
