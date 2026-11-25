@@ -2084,14 +2084,48 @@ private fun VpnScreen(status: String?, onRefresh: () -> Unit) {
 }
 
 
+private data class FirewallUciSection(val id: String, val type: String, val values: JSONObject)
+
+private fun parseFirewallUciSections(raw: String): List<FirewallUciSection> {
+    val start = raw.indexOf('{')
+    val end = raw.lastIndexOf('}')
+    if (start < 0 || end <= start) return emptyList()
+    val root = runCatching { JSONObject(raw.substring(start, end + 1)) }.getOrNull() ?: return emptyList()
+    val values = root.optJSONObject("values") ?: root
+    val result = mutableListOf<FirewallUciSection>()
+    val keys = values.keys()
+    while (keys.hasNext()) {
+        val id = keys.next()
+        val section = values.optJSONObject(id) ?: continue
+        val type = section.optString(".type", section.optString("type", ""))
+        if (type.isNotBlank()) result += FirewallUciSection(id, type, section)
+    }
+    return result
+}
+
+private fun firewallValue(section: JSONObject, key: String): String {
+    val value = section.opt(key) ?: return "—"
+    return when (value) {
+        is JSONArray -> (0 until value.length()).mapNotNull { value.optString(it).takeIf(String::isNotBlank) }.joinToString(", ").ifBlank { "—" }
+        JSONObject.NULL -> "—"
+        else -> value.toString().ifBlank { "—" }
+    }
+}
+
 @Composable
 private fun FirewallScreen(rules: String?, onRefresh: () -> Unit) {
     val text = rules.orEmpty()
     val sections = text.split("NFT_RULESET")
     val uci = sections.firstOrNull().orEmpty().substringAfter("UCI_FIREWALL", "")
     val nft = sections.getOrNull(1).orEmpty()
-    val uciLines = uci.lines().filter { it.isNotBlank() }
     val nftLines = nft.lines().filter { it.isNotBlank() }
+    val parsed = remember(uci) { parseFirewallUciSections(uci) }
+    val zones = parsed.filter { it.type == "zone" }
+    val rulesList = parsed.filter { it.type == "rule" }
+    val redirects = parsed.filter { it.type == "redirect" }
+    val defaults = parsed.filter { it.type == "defaults" }
+    var showRaw by remember { mutableStateOf(false) }
+
     LazyColumn(contentPadding = PaddingValues(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
@@ -2099,19 +2133,73 @@ private fun FirewallScreen(rules: String?, onRefresh: () -> Unit) {
                 Text("Правила firewall", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 IconButton(onClick = onRefresh) { Icon(Icons.Outlined.Refresh, null) }
             }
-            Text("Настройки зон, перенаправлений портов и фактические правила nftables (firewall4).",
+            Text("Зоны, правила фильтрации, перенаправления портов и фактический ruleset nftables.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         item {
-            InfoCard("Конфигурация UCI · ${uciLines.size} строк") {
-                Text(if (uciLines.isEmpty()) "Конфигурация firewall не получена." else uciLines.joinToString("\n"),
+            InfoCard("Сводка конфигурации") {
+                InfoLine("Зоны", zones.size.toString())
+                InfoLine("Правила", rulesList.size.toString())
+                InfoLine("Перенаправления портов", redirects.size.toString())
+                InfoLine("Параметры по умолчанию", defaults.size.toString())
+                if (parsed.isEmpty()) Text("Не удалось разобрать структуру UCI. Ниже доступен исходный ответ RPC.",
+                    color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        if (zones.isNotEmpty()) {
+            item { Text("Зоны сети", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
+            items(zones, key = { it.id }) { entry ->
+                InfoCard(firewallValue(entry.values, "name").let { if (it == "—") "Зона · ${entry.id}" else it }) {
+                    InfoLine("Сеть", firewallValue(entry.values, "network"))
+                    InfoLine("Входящий трафик", firewallValue(entry.values, "input"))
+                    InfoLine("Исходящий трафик", firewallValue(entry.values, "output"))
+                    InfoLine("Пересылка", firewallValue(entry.values, "forward"))
+                    InfoLine("Маскарадинг", firewallValue(entry.values, "masq"))
+                    InfoLine("MTU fix", firewallValue(entry.values, "mtu_fix"))
+                }
+            }
+        }
+        if (rulesList.isNotEmpty()) {
+            item { Text("Правила фильтрации", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
+            items(rulesList, key = { it.id }) { entry ->
+                InfoCard(firewallValue(entry.values, "name").let { if (it == "—") "Правило · ${entry.id}" else it }) {
+                    InfoLine("Источник", firewallValue(entry.values, "src"))
+                    InfoLine("Назначение", firewallValue(entry.values, "dest"))
+                    InfoLine("Протокол", firewallValue(entry.values, "proto"))
+                    InfoLine("Порт источника", firewallValue(entry.values, "src_port"))
+                    InfoLine("Порт назначения", firewallValue(entry.values, "dest_port"))
+                    InfoLine("Действие", firewallValue(entry.values, "target"))
+                    InfoLine("Включено", firewallValue(entry.values, "enabled"))
+                }
+            }
+        }
+        if (redirects.isNotEmpty()) {
+            item { Text("Перенаправления портов", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
+            items(redirects, key = { it.id }) { entry ->
+                InfoCard(firewallValue(entry.values, "name").let { if (it == "—") "Перенаправление · ${entry.id}" else it }) {
+                    InfoLine("Внешняя зона", firewallValue(entry.values, "src"))
+                    InfoLine("Внешний порт", firewallValue(entry.values, "src_dport"))
+                    InfoLine("Внутренний адрес", firewallValue(entry.values, "dest_ip"))
+                    InfoLine("Внутренний порт", firewallValue(entry.values, "dest_port"))
+                    InfoLine("Протокол", firewallValue(entry.values, "proto"))
+                    InfoLine("Включено", firewallValue(entry.values, "enabled"))
+                }
+            }
+        }
+        item {
+            InfoCard("Активные правила nftables · ${nftLines.size} строк") {
+                Text(if (nftLines.isEmpty()) nft.trim().ifBlank { "Не удалось прочитать nft ruleset. Проверь наличие nftables и разрешения RPC file.exec." }
+                    else nftLines.joinToString("\n"),
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
             }
         }
         item {
-            InfoCard("Активные правила nftables · ${nftLines.size} строк") {
-                Text(if (nftLines.isEmpty()) "Не удалось прочитать nft ruleset. Проверь наличие nftables." else nftLines.joinToString("\n"),
+            OutlinedButton(onClick = { showRaw = !showRaw }, modifier = Modifier.fillMaxWidth()) {
+                Text(if (showRaw) "Скрыть исходную конфигурацию UCI" else "Показать исходную конфигурацию UCI")
+            }
+            if (showRaw) InfoCard("Исходный ответ UCI") {
+                Text(uci.ifBlank { "UCI firewall не получен." },
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
             }
