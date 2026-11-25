@@ -344,16 +344,21 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                             "echo TAILSCALE_STATUS; if command -v tailscale >/dev/null 2>&1; then tailscale status 2>&1 | head -n 30; echo TAILSCALE_IP; tailscale ip -4 2>&1; fi; echo SING_BOX_VERSION; sing-box version 2>&1 | head -n 2; " +
                             "echo TUNNEL_INTERFACES; ip -o addr 2>/dev/null | grep -E \"tailscale|tun|wg|sing\" || true; " +
                             "echo VPN_PROCESS_STATS; top -bn1 2>/dev/null | head -n 25; echo ROUTES; ip route 2>/dev/null | head -n 15; echo VPN_LOGS; logread 2>/dev/null | grep -iE \"tailscale|sing-box|vless|wireguard|openvpn\" | tail -n 25 || true")))
-                        Screen.SERVICES -> {
-                            // rc.list provides live runtime state; luci.getInitList supplies
-                            // the complete init-script inventory and autostart flags.
+                        Screen.SERVICES, Screen.PROCESSES -> {
+                            // /etc/init.d is the authoritative inventory; ubus supplies runtime state.
                             val rcServices = runCatching { client.call("rc", "list") }.getOrDefault(JSONObject())
                             val initServices = runCatching { client.call("luci", "getInitList") }.getOrNull()
+                            val initNames = runCatching {
+                                client.execReadOnly("ls", listOf("-1", "/etc/init.d"))
+                                    .lineSequence().map { it.trim() }
+                                    .filter { it.matches(Regex("[A-Za-z0-9_.-]+")) }.toList()
+                            }.getOrDefault(emptyList())
                             val mergedServices = JSONObject()
                             val serviceNames = linkedSetOf<String>()
+                            initNames.forEach { serviceNames += it }
                             rcServices.keys().forEach { serviceNames += it }
                             initServices?.keys()?.forEach { serviceNames += it }
-                            serviceNames.forEach { name ->
+                            serviceNames.sorted().forEach { name ->
                                 val merged = JSONObject()
                                 val init = initServices?.optJSONObject(name)
                                 val runtime = rcServices.optJSONObject(name)
@@ -361,12 +366,10 @@ private fun RouterDashApp(biometricUnlockSignal: Int, onEnableBiometric: (() -> 
                                 runtime?.keys()?.forEach { key -> merged.put(key, runtime.opt(key)) }
                                 mergedServices.put(name, merged)
                             }
-                            snapshot.copy(
-                                services = mergedServices,
-                                processes = runCatching { client.execReadOnly("top", listOf("-bn1")) }.getOrDefault("") +
-                                    "\n--ROUTERDASH-PS--\n" +
-                                    runCatching { client.execReadOnly("ps", listOf("-o", "pid,comm,rss")) }.getOrDefault("")
-                            )
+                            val processOutput = runCatching { client.execReadOnly("top", listOf("-bn1")) }.getOrDefault("") +
+                                "\n--ROUTERDASH-PS--\n" +
+                                runCatching { client.execReadOnly("ps", listOf("-o", "pid,comm,rss")) }.getOrDefault("")
+                            snapshot.copy(services = mergedServices, processes = processOutput)
                         }
                         Screen.LOGS -> {
                             val args = JSONObject().put("lines", 300)
