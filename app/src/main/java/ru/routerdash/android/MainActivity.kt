@@ -397,7 +397,8 @@ private fun RouterDashApp(biometricUnlockSignal: Int, pickedSyncFolderUri: Strin
                                 append("\n\nФИЗИЧЕСКИЕ УСТРОЙСТВА\n"); append(deviceList)
                                 append("\n\nРАЗДЕЛЫ /SYS/BLOCK\n"); append(sysBlock)
                                 append("\n\nDISKSTATS\n"); append(diskStats)
-                                append("\n\nMOUNT\n"); append(mountOutput.ifBlank { "Нет данных" })                                append("\n\nDF -H\n"); append(dfHuman)
+                                append("\n\nMOUNT\n"); append(mountOutput.ifBlank { "Нет данных" })
+                                append("\n\nDF -H\n"); append(dfHuman)
                             }
                             snapshot.copy(storage = mounts, storageError = diagnostic, diskDetails = diskDetails)
                         }
@@ -1193,7 +1194,8 @@ private fun StatusRecommendationsCard(cpuPercent: Int?, ramPercent: Int?, availa
     }
 }
 
-@Composableprivate fun CpuHistoryChart(history: List<Int>) {
+@Composable
+private fun CpuHistoryChart(history: List<Int>) {
     val accent = MaterialTheme.colorScheme.primary
     val grid = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f)
     val label = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2188,7 +2190,8 @@ private fun FirewallScreen(rules: String?, onRefresh: () -> Unit) {
             }
             Text("Зоны, правила фильтрации, перенаправления портов и фактический ruleset nftables.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }        item {
+        }
+        item {
             InfoCard("Сводка конфигурации") {
                 InfoLine("Зоны", zones.size.toString())
                 InfoLine("Правила", rulesList.size.toString())
@@ -2586,7 +2589,8 @@ internal class SshTerminal(private val context: android.content.Context) {
     }
 
     internal fun ensureRemoteDirectory(path: String) {
-        val sftp = openSftp()        try {
+        val sftp = openSftp()
+        try {
             var current = if (path.startsWith("/")) "/" else ""
             path.split('/').filter { it.isNotBlank() }.forEach { part ->
                 current = if (current == "/") "/$part" else if (current.isBlank()) part else "$current/$part"
